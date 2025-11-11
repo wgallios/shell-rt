@@ -7,6 +7,39 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 
+def read_shell_history() -> str:
+    paths = [Path("~/.zsh_history").expanduser(), Path("~/.bash_history").expanduser()]
+    lines: List[str] = []
+
+    for p in paths:
+        if not p.exists(): continue
+
+        with p.open("r", errors="ignore") as f:
+            for line in f:
+                line = line.rstrip("\n")
+
+                #zsh format: ": 1627891234:0;git status"
+
+                m = re.match(r"^: \d+:0;(.*)$", line)
+                cmd = m.group(1) if m else line
+                cmd = cmd.strip()
+
+                if (cmd):
+                    # print(f"Read command: {cmd}")
+                    lines.append(cmd)
+
+    return "\n".join(lines)
+
+
+
+
+
+def train_model(args):
+    print("Start Training Model")
+    text = read_shell_history()
+    print(f"Read {len(text)} characters from shell history.")
+
+
 def main():
     print("Shell Next Command Prediction with LSTM")
 
@@ -34,7 +67,7 @@ def main():
     args = p.parse_args()
 
     if (args.cmd == "train"):
-        print("Start Training")
+        train_model(args)
     elif (args.cmd == "suggest"):
         print("Start Suggesting")
     else:
