@@ -15,6 +15,8 @@ def main():
 
     t = sub.add_parser("train");
     t.add_argument("--epochs", type=int, default=3)
+    t.add_argument("--batch-size", type=int, default=64)
+    t.add_argument("--seq-len", type=int, default=128)
 
     args = p.parse_args()
 
