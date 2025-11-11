@@ -17,6 +17,10 @@ def main():
     t.add_argument("--epochs", type=int, default=3)
     t.add_argument("--batch-size", type=int, default=64)
     t.add_argument("--seq-len", type=int, default=128)
+    t.add_argument("--emb", type=int, default=128)
+    t.add_argument("--hidden", type=int, default=256)
+    t.add_argument("--layers", type=int, default=2)
+    t.add_argument("--lr", type=float, default=3e-3)
 
     args = p.parse_args()
 
