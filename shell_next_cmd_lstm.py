@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 from vocab.char_vocab import CharVocab
+from dataset.char_dataset import CharDataset
 
 
 def read_shell_history() -> str:
