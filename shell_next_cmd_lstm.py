@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
+from vocab.char_vocab import CharVocab
+
 
 def read_shell_history() -> str:
     paths = [Path("~/.zsh_history").expanduser(), Path("~/.bash_history").expanduser()]
@@ -38,6 +40,13 @@ def train_model(args):
     print("Start Training Model")
     text = read_shell_history()
     print(f"Read {len(text)} characters from shell history.")
+
+    if len(text) < 200:
+        print("Not enough data to train. Please add more commands to your shell history.")
+        return
+
+    vocab = CharVocab(text)
+
 
 
 def main():
