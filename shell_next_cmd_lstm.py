@@ -21,6 +21,15 @@ def main():
     t.add_argument("--hidden", type=int, default=256)
     t.add_argument("--layers", type=int, default=2)
     t.add_argument("--lr", type=float, default=3e-3)
+    t.add_argument("--out-dir", type=str, default="./model")
+
+
+    s = sub.add_parser("suggest");
+    s.add_argument("--model", type=str, default="./model/checkpoint.pt")
+    s.add_argument("--prompt", type=str, required=True, help="Seed text, e.g. 'git add .\\n'")
+    s.add_argument("--max-new", type=int, default=120)
+    s.add_argument("--temp", type=float, default=0.8)
+    s.add_argument("--top-k", type=int, default=20)
 
     args = p.parse_args()
 
