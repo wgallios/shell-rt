@@ -47,6 +47,8 @@ def train_model(args):
         return
 
     vocab = CharVocab(text)
+    dataset = CharDataset(text, vocab, seq_len=args.seq_len)
+    # dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
 
 
