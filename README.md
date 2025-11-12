@@ -1,4 +1,4 @@
-# shell-rt
+# Shell RT
 Shell Command prediction using Reinforcement Training
 
 # Setup & Installation
