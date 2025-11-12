@@ -10,3 +10,14 @@ class CharDataset(Dataset):
         data = vocab.encode(text)
 
         self.data = torch.tensor(data, dtype=torch.long)
+
+        self.n = len(self.data - seq_len - 1)
+        self.n = max(self.n, 0)
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, idx):
+        x = self.data[idx:idex+self.seq_len]
+        y = self.data[idx+1:idx+self.seq_len+1]
+        return x, y
