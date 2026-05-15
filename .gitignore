@@ -162,6 +162,9 @@ dmypy.json
 # Generated model checkpoints
 model/
 
+# Local feedback logs
+feedback/
+
 # Pyre type checker
 .pyre/
 

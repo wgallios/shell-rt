@@ -59,3 +59,99 @@ def test_suggest_cmd_prints_json_completion(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["prompt"] == "git"
     assert isinstance(payload["suggestion"], str)
+
+
+def test_feedback_cmd_records_event(tmp_path, capsys):
+    store = tmp_path / "feedback" / "events.jsonl"
+    args = SimpleNamespace(
+        prompt="git ",
+        suggestion="status",
+        action="accepted",
+        command=None,
+        exit_code=None,
+        reward=None,
+        store=str(store),
+    )
+
+    cli.feedback_cmd(args)
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["store"] == str(store)
+    assert output["reward"] == 1.0
+
+    lines = store.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    for key in ["id", "created_at", "prompt", "suggestion", "action", "reward", "cwd", "source"]:
+        assert key in event
+    assert event["prompt"] == "git "
+    assert event["suggestion"] == "status"
+    assert event["action"] == "accepted"
+    assert event["command"] == "status"
+    assert event["source"] == "cli"
+
+
+def test_feedback_default_rewards(tmp_path):
+    expected = {
+        "accepted": 1.0,
+        "executed": 2.0,
+        "edited": 0.5,
+        "rejected": -1.0,
+    }
+
+    for action, reward in expected.items():
+        args = SimpleNamespace(
+            prompt="git ",
+            suggestion="status",
+            action=action,
+            command=None,
+            exit_code=None,
+            reward=None,
+            store=str(tmp_path / "events.jsonl"),
+        )
+
+        assert cli.build_feedback_event(args)["reward"] == reward
+
+
+def test_feedback_reward_override(tmp_path):
+    args = SimpleNamespace(
+        prompt="git ",
+        suggestion="stat",
+        action="edited",
+        command="git status",
+        exit_code=0,
+        reward=0.75,
+        store=str(tmp_path / "events.jsonl"),
+    )
+
+    event = cli.build_feedback_event(args)
+
+    assert event["reward"] == 0.75
+    assert event["exit_code"] == 0
+
+
+def test_feedback_command_defaults_for_accepted_and_executed():
+    for action in ["accepted", "executed"]:
+        args = SimpleNamespace(
+            prompt="git ",
+            suggestion="status",
+            action=action,
+            command=None,
+            exit_code=None,
+            reward=None,
+        )
+
+        assert cli.build_feedback_event(args)["command"] == "status"
+
+
+def test_feedback_edited_stores_provided_command():
+    args = SimpleNamespace(
+        prompt="git ",
+        suggestion="stat",
+        action="edited",
+        command="git status",
+        exit_code=None,
+        reward=None,
+    )
+
+    assert cli.build_feedback_event(args)["command"] == "git status"

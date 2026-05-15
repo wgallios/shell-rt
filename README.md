@@ -17,6 +17,7 @@ CLI for generating suggestions.
 - Saves model checkpoints under `./model/checkpoint.pt` by default.
 - Loads a saved checkpoint and generates command continuations.
 - Prints suggestions as JSON so shell scripts or terminal integrations can consume them.
+- Appends local feedback events and rewards to `./feedback/events.jsonl` by default.
 
 # Setup & Installation
 
@@ -46,6 +47,28 @@ The `suggest` command prints JSON so it can be consumed from shell scripts:
 {"prompt": "git ", "suggestion": "status"}
 ```
 
+# Feedback Logging
+
+Record explicit user feedback for a suggestion:
+
+```bash
+python shell_next_cmd_lstm.py feedback \
+  --prompt "git " \
+  --suggestion "status" \
+  --action accepted
+```
+
+Rejected, edited, and executed suggestions can be logged too:
+
+```bash
+python shell_next_cmd_lstm.py feedback --prompt "git " --suggestion "status" --action rejected
+python shell_next_cmd_lstm.py feedback --prompt "git " --suggestion "stat" --action edited --command "git status" --reward 0.75
+python shell_next_cmd_lstm.py feedback --prompt "pytest " --suggestion "tests/" --action executed --exit-code 0
+```
+
+Feedback is stored as append-only JSONL. This is data collection only; it does not update the
+model, train from rewards, or rank future suggestions yet.
+
 # Model Output
 
 The model generates text, not validated shell commands. Suggestions should be treated as draft
@@ -64,7 +87,6 @@ suggestions.
   exit codes.
 - Command safety checks before suggesting destructive commands.
 - Ranking multiple candidate commands.
-- A feedback store for user actions and rewards.
 - Packaging as an installable command-line tool.
 - Model versioning, checkpoint metadata migration, or reproducible training seeds.
 

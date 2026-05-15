@@ -2,8 +2,10 @@ import argparse
 import json
 import re
 
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, List, Tuple
+from uuid import uuid4
 
 import torch
 import torch.nn as nn
@@ -12,6 +14,15 @@ from torch.utils.data import DataLoader
 from vocab.char_vocab import CharVocab
 from dataset.char_dataset import CharDataset
 from LSTM.CharLSTM import CharLSTM
+
+
+DEFAULT_FEEDBACK_STORE = "./feedback/events.jsonl"
+FEEDBACK_REWARDS = {
+    "accepted": 1.0,
+    "executed": 2.0,
+    "edited": 0.5,
+    "rejected": -1.0,
+}
 
 
 def read_shell_history() -> str:
@@ -189,6 +200,44 @@ def suggest_cmd(args):
     print(json.dumps({"prompt": args.prompt, "suggestion": completion}))
 
 
+def build_feedback_event(args) -> dict[str, Any]:
+    reward = FEEDBACK_REWARDS[args.action] if args.reward is None else args.reward
+    command = args.command
+    if command is None and args.action in {"accepted", "executed"}:
+        command = args.suggestion
+
+    event: dict[str, Any] = {
+        "id": str(uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "prompt": args.prompt,
+        "suggestion": args.suggestion,
+        "action": args.action,
+        "reward": float(reward),
+        "cwd": str(Path.cwd()),
+        "source": "cli",
+    }
+
+    if command is not None:
+        event["command"] = command
+    if args.exit_code is not None:
+        event["exit_code"] = args.exit_code
+
+    return event
+
+
+def write_feedback_event(store: Path, event: dict[str, Any]) -> None:
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with store.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def feedback_cmd(args):
+    store = Path(args.store)
+    event = build_feedback_event(args)
+    write_feedback_event(store, event)
+    print(json.dumps({"id": event["id"], "store": str(store), "reward": event["reward"]}))
+
+
 
 def main():
     p = argparse.ArgumentParser(description="Train an LSTM model to predict the next shell command.")
@@ -213,12 +262,23 @@ def main():
     s.add_argument("--temp", type=float, default=0.8)
     s.add_argument("--top-k", type=int, default=20)
 
+    f = sub.add_parser("feedback")
+    f.add_argument("--prompt", type=str, required=True, help="Original prompt text.")
+    f.add_argument("--suggestion", type=str, required=True, help="Model suggestion text.")
+    f.add_argument("--action", type=str, required=True, choices=sorted(FEEDBACK_REWARDS))
+    f.add_argument("--command", type=str, default=None, help="Final command text, if any.")
+    f.add_argument("--exit-code", type=int, default=None)
+    f.add_argument("--reward", type=float, default=None, help="Override the default action reward.")
+    f.add_argument("--store", type=str, default=DEFAULT_FEEDBACK_STORE)
+
     args = p.parse_args()
 
     if args.cmd == "train":
         train_model(args)
     elif args.cmd == "suggest":
         suggest_cmd(args)
+    elif args.cmd == "feedback":
+        feedback_cmd(args)
     else:
         p.print_help()
 
