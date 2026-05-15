@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shell-rt"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local shell command prediction experiment."
 readme = "README.md"
 requires-python = ">=3.12"

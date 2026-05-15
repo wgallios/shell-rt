@@ -43,8 +43,9 @@ pip install -e .
 shell-rt --help
 ```
 
-Both forms remain supported. The examples below use the checkout script path; after installation,
-you can replace `python shell_next_cmd_lstm.py` with `shell-rt`.
+Both forms remain supported. `shell_next_cmd_lstm.py` intentionally remains the script-style CLI
+entrypoint for checkout compatibility; after installation, you can replace
+`python shell_next_cmd_lstm.py` with `shell-rt`.
 
 # Usage
 
