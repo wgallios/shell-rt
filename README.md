@@ -1,12 +1,13 @@
 # Shell RT
 
-Shell RT is an early shell command prediction experiment. The current implementation trains a
-small character-level LSTM on local shell history and uses that model to suggest a continuation
-for a prompt such as `git ` or `python `.
+Shell RT is local AI for your shell: a lightweight terminal autocomplete and command prediction
+tool that learns from your own zsh and bash history. It trains a small character-level LSTM on
+local command history, then suggests command continuations for prompts such as `git ` or
+`python `.
 
-This is currently a supervised next-character prediction model. It learns from historical shell
-commands in `~/.zsh_history` and `~/.bash_history`, saves a local checkpoint, and exposes a small
-CLI for generating suggestions.
+The project focuses on private, on-device shell assistance for developers. It reads historical
+commands from `~/.zsh_history` and `~/.bash_history`, saves a local checkpoint, and exposes a
+small CLI plus shell integrations for generating suggestions.
 
 # Features
 
