@@ -527,6 +527,24 @@ def choose_context_candidate(prompt: str, candidates: list[str], context: dict[s
     return max(candidates, key=lambda candidate: context_score(prompt + candidate, context))
 
 
+def rank_candidate_commands(
+    prompt: str,
+    candidates: list[str],
+    context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+
+    for completion in candidates:
+        if not is_safe_suggestion(prompt, completion):
+            continue
+
+        command = prompt + completion
+        score = context_score(command, context) if context is not None else 0.0
+        ranked.append({"completion": completion, "command": command, "score": score})
+
+    return sorted(ranked, key=lambda candidate: candidate["score"], reverse=True)
+
+
 def suggest_cmd(args):
     checkpoint_path = Path(args.model)
     if not checkpoint_path.exists():
@@ -535,7 +553,11 @@ def suggest_cmd(args):
 
     model, vocab, config = load_model(checkpoint_path)
     seq_len = config.get("seq_len", 128)
-    if getattr(args, "context_json", None) is None:
+    context = getattr(args, "context_json", None)
+    include_candidates = bool(getattr(args, "include_candidates", False))
+    ranked_candidates: list[dict[str, Any]] = []
+
+    if context is None and not include_candidates:
         output = sample_next(
             model,
             vocab,
@@ -559,11 +581,12 @@ def suggest_cmd(args):
             top_k=args.top_k,
             seq_len=seq_len,
         )
-        safe_candidates = [candidate for candidate in candidates if is_safe_suggestion(args.prompt, candidate)]
-        completion = choose_context_candidate(args.prompt, safe_candidates, args.context_json)
-        if completion is None and candidates:
+        ranked_candidates = rank_candidate_commands(args.prompt, candidates, context)
+        if ranked_candidates:
+            completion = ranked_candidates[0]["completion"]
+        elif candidates:
             completion = ""
-        elif completion is None:
+        elif context is not None and not include_candidates:
             output = sample_next(
                 model,
                 vocab,
@@ -576,10 +599,14 @@ def suggest_cmd(args):
             completion = output[len(args.prompt):].strip("\n")
             if not is_safe_suggestion(args.prompt, completion):
                 completion = ""
+        else:
+            completion = ""
 
     payload: dict[str, Any] = {"prompt": args.prompt, "suggestion": completion}
-    if getattr(args, "context_json", None) is not None:
-        payload["context"] = args.context_json
+    if context is not None:
+        payload["context"] = context
+    if include_candidates:
+        payload["candidates"] = ranked_candidates
     print(json.dumps(payload))
 
 
@@ -648,6 +675,7 @@ def main():
     s.add_argument("--top-k", type=int, default=20)
     s.add_argument("--context-json", type=parse_context_json, default=None)
     s.add_argument("--rank-candidates", type=positive_int, default=5)
+    s.add_argument("--include-candidates", action="store_true")
 
     f = sub.add_parser("feedback")
     f.add_argument("--prompt", type=str, required=True, help="Original prompt text.")

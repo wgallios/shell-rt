@@ -122,6 +122,45 @@ def test_suggest_without_context_samples_once(tmp_path, capsys, monkeypatch):
     assert calls == ["git "]
 
 
+def test_suggest_without_context_include_candidates_samples_rank_count(tmp_path, capsys, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    outputs = iter(["status\n", "diff\n", "log\n"])
+    calls = []
+
+    monkeypatch.setattr(cli, "load_model", lambda path: (object(), object(), {"seq_len": 8}))
+
+    def fake_sample_next(*args, **kwargs):
+        calls.append(kwargs["prompt"])
+        return kwargs["prompt"] + next(outputs)
+
+    monkeypatch.setattr(cli, "sample_next", fake_sample_next)
+
+    args = SimpleNamespace(
+        model=str(checkpoint_path),
+        prompt="git ",
+        max_new=20,
+        temp=1.0,
+        top_k=5,
+        rank_candidates=3,
+        include_candidates=True,
+    )
+
+    cli.suggest_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "prompt": "git ",
+        "suggestion": "status",
+        "candidates": [
+            {"completion": "status", "command": "git status", "score": 0.0},
+            {"completion": "diff", "command": "git diff", "score": 0.0},
+            {"completion": "log", "command": "git log", "score": 0.0},
+        ],
+    }
+    assert calls == ["git ", "git ", "git "]
+
+
 def test_suggest_with_context_reranks_sampled_candidates(tmp_path, capsys, monkeypatch):
     checkpoint_path = tmp_path / "checkpoint.pt"
     checkpoint_path.write_bytes(b"checkpoint")
@@ -153,6 +192,34 @@ def test_suggest_with_context_reranks_sampled_candidates(tmp_path, capsys, monke
     assert "candidates" not in payload
 
 
+def test_suggest_with_context_include_candidates_emits_ranked_candidates(tmp_path, capsys, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    outputs = iter(["log\n", "status\n", "commit -m test\n"])
+
+    monkeypatch.setattr(cli, "load_model", lambda path: (object(), object(), {"seq_len": 8}))
+    monkeypatch.setattr(cli, "sample_next", lambda *args, **kwargs: kwargs["prompt"] + next(outputs))
+
+    context = {"git": {"ref": "main", "dirty": True, "untracked": False}}
+    args = SimpleNamespace(
+        model=str(checkpoint_path),
+        prompt="git ",
+        max_new=20,
+        temp=1.0,
+        top_k=5,
+        context_json=context,
+        rank_candidates=3,
+        include_candidates=True,
+    )
+
+    cli.suggest_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suggestion"] == payload["candidates"][0]["completion"]
+    assert payload["candidates"][0] == {"completion": "status", "command": "git status", "score": 5.0}
+    assert payload["context"] == context
+
+
 def test_suggest_without_context_suppresses_unsafe_sampled_completion(tmp_path, capsys, monkeypatch):
     checkpoint_path = tmp_path / "checkpoint.pt"
     checkpoint_path.write_bytes(b"checkpoint")
@@ -172,6 +239,30 @@ def test_suggest_without_context_suppresses_unsafe_sampled_completion(tmp_path, 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload == {"prompt": "git ", "suggestion": ""}
+
+
+def test_suggest_include_candidates_returns_empty_when_all_candidates_are_unsafe(tmp_path, capsys, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    outputs = iter(["reset --hard\n", "clean -fdx\n"])
+
+    monkeypatch.setattr(cli, "load_model", lambda path: (object(), object(), {"seq_len": 8}))
+    monkeypatch.setattr(cli, "sample_next", lambda *args, **kwargs: kwargs["prompt"] + next(outputs))
+
+    args = SimpleNamespace(
+        model=str(checkpoint_path),
+        prompt="git ",
+        max_new=20,
+        temp=1.0,
+        top_k=5,
+        rank_candidates=2,
+        include_candidates=True,
+    )
+
+    cli.suggest_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"prompt": "git ", "suggestion": "", "candidates": []}
 
 
 def test_suggest_with_context_filters_unsafe_candidates_before_reranking(tmp_path, capsys, monkeypatch):
@@ -244,6 +335,36 @@ def test_collect_candidate_completions_deduplicates_first_occurrence():
     )
 
     assert candidates == ["status", "diff"]
+
+
+def test_rank_candidate_commands_sorts_context_scores_descending():
+    context = {"git": {"ref": "main", "dirty": True, "untracked": True}}
+
+    ranked = cli.rank_candidate_commands("git ", ["log", "status", "diff"], context)
+
+    assert [candidate["completion"] for candidate in ranked] == ["status", "diff", "log"]
+    assert ranked[0]["score"] >= ranked[1]["score"] >= ranked[2]["score"]
+
+
+def test_rank_candidate_commands_preserves_sample_order_for_equal_scores():
+    ranked = cli.rank_candidate_commands("git ", ["alpha", "beta", "gamma"])
+
+    assert [candidate["completion"] for candidate in ranked] == ["alpha", "beta", "gamma"]
+
+
+def test_rank_candidate_commands_filters_unsafe_completions_before_ranking():
+    ranked = cli.rank_candidate_commands("git ", ["reset --hard", "status", "clean -fdx"])
+
+    assert ranked == [{"completion": "status", "command": "git status", "score": 0.0}]
+
+
+def test_rank_candidate_commands_includes_completion_command_and_score_fields():
+    ranked = cli.rank_candidate_commands("pytest ", ["tests/test_shell_next_cmd_lstm.py"])
+
+    assert set(ranked[0]) == {"completion", "command", "score"}
+    assert ranked[0]["completion"] == "tests/test_shell_next_cmd_lstm.py"
+    assert ranked[0]["command"] == "pytest tests/test_shell_next_cmd_lstm.py"
+    assert isinstance(ranked[0]["score"], float)
 
 
 def test_is_destructive_command_detects_high_confidence_destructive_patterns():

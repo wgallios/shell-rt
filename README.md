@@ -17,6 +17,7 @@ CLI for generating suggestions.
 - Saves model checkpoints under `./model/checkpoint.pt` by default.
 - Loads a saved checkpoint and generates command continuations.
 - Uses captured context for lightweight heuristic reranking when context is provided.
+- Can return an opt-in ranked list of sampled candidate commands for CLI/API consumers.
 - Applies deterministic safety checks that suppress clear destructive command suggestions before
   display.
 - Prints suggestions as JSON so shell scripts or terminal integrations can consume them.
@@ -68,12 +69,33 @@ from `--prompt` only; context is not model conditioning, retraining, or feedback
 heuristics based on captured `cwd`, `last_exit_code`, `env`, `git`, and `open_files` fields. Use
 `--rank-candidates` to control the candidate count, defaulting to `5`.
 
+Callers that want to inspect alternatives can opt in to ranked candidate output:
+
+```bash
+python shell_next_cmd_lstm.py suggest \
+  --prompt "git " \
+  --context-json '{"git":{"ref":"main","dirty":true}}' \
+  --include-candidates
+```
+
+With `--include-candidates`, the JSON response includes a `candidates` array. Each entry has:
+
+- `completion`: the generated suffix for the prompt.
+- `command`: the full command text, formed as `prompt + completion`.
+- `score`: the ranking score. Context-aware calls use the same deterministic context heuristics;
+  calls without context use `0.0` and preserve sampling order for ties.
+
+The top-level `suggestion` is the first ranked candidate's `completion`. Without
+`--include-candidates`, the default JSON contract remains unchanged and no `candidates` field is
+emitted.
+
 Before output, `suggest` applies a deterministic safety gate to the full proposed command text
 formed from `--prompt` plus the generated completion. This v1 gate is conservative and suppresses
 high-confidence destructive commands such as file deletion, forced git discard workflows, disk
 formatting or device writes, power operations, recursive permission or ownership changes, and moves
 to obvious trash paths. Suppressed suggestions keep the same JSON shape and return an empty
-`"suggestion": ""`.
+`"suggestion": ""`. Unsafe completions are filtered before ranking, so `--include-candidates`
+never emits candidates that fail the safety gate.
 
 # Zsh Inline Suggestions
 
@@ -145,7 +167,6 @@ suggestions.
 
 # Not Yet Implemented
 
-- Ranking multiple candidate commands.
 - Online learning while the terminal is being used.
 - Reinforcement learning from accepted, rejected, edited, or executed suggestions.
 - Model versioning, checkpoint metadata migration, or reproducible training seeds.
