@@ -16,6 +16,14 @@ fi
 
 typeset -g SHELL_RT_MODEL="${SHELL_RT_MODEL:-$SHELL_RT_ROOT/model/checkpoint.pt}"
 typeset -g SHELL_RT_FEEDBACK_STORE="${SHELL_RT_FEEDBACK_STORE:-$SHELL_RT_ROOT/feedback/events.jsonl}"
+typeset -g SHELL_RT_ONLINE_LEARNING="${SHELL_RT_ONLINE_LEARNING:-0}"
+typeset -g SHELL_RT_ONLINE_STATE="${SHELL_RT_ONLINE_STATE:-$SHELL_RT_ROOT/feedback/online_state.json}"
+typeset -g SHELL_RT_ONLINE_MIN_EVENTS="${SHELL_RT_ONLINE_MIN_EVENTS:-1}"
+typeset -g SHELL_RT_ONLINE_MAX_EVENTS="${SHELL_RT_ONLINE_MAX_EVENTS:-8}"
+typeset -g SHELL_RT_ONLINE_EPOCHS="${SHELL_RT_ONLINE_EPOCHS:-1}"
+typeset -g SHELL_RT_ONLINE_BATCH_SIZE="${SHELL_RT_ONLINE_BATCH_SIZE:-8}"
+typeset -g SHELL_RT_ONLINE_LR="${SHELL_RT_ONLINE_LR:-1e-4}"
+typeset -g SHELL_RT_ONLINE_GRAD_CLIP="${SHELL_RT_ONLINE_GRAD_CLIP:-1.0}"
 
 typeset -g SHELL_RT_SUGGESTION=""
 typeset -g SHELL_RT_SUGGESTION_PROMPT=""
@@ -254,7 +262,24 @@ function shell_rt_accept_suggestion() {
     --store "$SHELL_RT_FEEDBACK_STORE"
     --context-json "$context_json"
   )
-  "${feedback_cmd[@]}" >/dev/null 2>&1 &!
+
+  if [[ "$SHELL_RT_ONLINE_LEARNING" == "1" ]]; then
+    (
+      "${feedback_cmd[@]}" >/dev/null 2>&1 && \
+      "$SHELL_RT_PYTHON" "$SHELL_RT_ROOT/shell_next_cmd_lstm.py" online-learn \
+        --model "$SHELL_RT_MODEL" \
+        --store "$SHELL_RT_FEEDBACK_STORE" \
+        --state "$SHELL_RT_ONLINE_STATE" \
+        --min-events "$SHELL_RT_ONLINE_MIN_EVENTS" \
+        --max-events "$SHELL_RT_ONLINE_MAX_EVENTS" \
+        --epochs "$SHELL_RT_ONLINE_EPOCHS" \
+        --batch-size "$SHELL_RT_ONLINE_BATCH_SIZE" \
+        --lr "$SHELL_RT_ONLINE_LR" \
+        --grad-clip "$SHELL_RT_ONLINE_GRAD_CLIP" >/dev/null 2>&1
+    ) &!
+  else
+    "${feedback_cmd[@]}" >/dev/null 2>&1 &!
+  fi
 
   shell_rt_clear_suggestion
   zle redisplay

@@ -36,6 +36,23 @@ def test_zsh_integration_script_uses_cli_contract_and_feedback_store():
     assert "SHELL_RT_FEEDBACK_STORE" in script
 
 
+def test_zsh_integration_gates_online_learning_after_accepted_feedback():
+    script = (ROOT / "shell_rt.zsh").read_text(encoding="utf-8")
+
+    assert 'SHELL_RT_ONLINE_LEARNING="${SHELL_RT_ONLINE_LEARNING:-0}"' in script
+    assert "SHELL_RT_ONLINE_STATE" in script
+    assert "SHELL_RT_ONLINE_MIN_EVENTS" in script
+    assert "SHELL_RT_ONLINE_MAX_EVENTS" in script
+    assert "SHELL_RT_ONLINE_EPOCHS" in script
+    assert "SHELL_RT_ONLINE_BATCH_SIZE" in script
+    assert "SHELL_RT_ONLINE_LR" in script
+    assert "SHELL_RT_ONLINE_GRAD_CLIP" in script
+    assert 'if [[ "$SHELL_RT_ONLINE_LEARNING" == "1" ]]; then' in script
+    assert "online-learn" in script
+    assert '"${feedback_cmd[@]}" >/dev/null 2>&1 && \\' in script
+    assert "--state \"$SHELL_RT_ONLINE_STATE\"" in script
+
+
 def test_zsh_integration_collects_low_risk_context():
     script = (ROOT / "shell_rt.zsh").read_text(encoding="utf-8")
 

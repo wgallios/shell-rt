@@ -23,6 +23,7 @@ CLI for generating suggestions.
 - Prints suggestions as JSON so shell scripts or terminal integrations can consume them.
 - Provides a zsh source script for manual inline suggestions in the command line.
 - Appends local feedback events and rewards to `./feedback/events.jsonl` by default.
+- Can opt in to accepted-only online learning from zsh feedback events in small background batches.
 - Captures low-risk terminal context in the zsh integration, including current directory,
   previous exit code, allowlisted environment variables, concise git state, and recently opened
   editor files.
@@ -131,6 +132,22 @@ SHELL_RT_FEEDBACK_STORE=/path/to/events.jsonl
 source /path/to/shell-rt/shell_rt.zsh
 ```
 
+Online learning is disabled by default. To fine-tune the current checkpoint after accepted
+suggestions, opt in before sourcing:
+
+```zsh
+SHELL_RT_ONLINE_LEARNING=1
+SHELL_RT_ONLINE_MIN_EVENTS=1
+SHELL_RT_ONLINE_MAX_EVENTS=8
+source /path/to/shell-rt/shell_rt.zsh
+```
+
+When enabled, accepting a suggestion still writes feedback first. After that feedback command
+succeeds, zsh starts `online-learn` in the background. The learner reads new accepted events from
+`SHELL_RT_FEEDBACK_STORE`, trains a tiny batch, writes a temporary checkpoint, and atomically
+replaces `SHELL_RT_MODEL`. It uses `SHELL_RT_ONLINE_STATE` to track the last processed byte offset.
+This v1 path learns only from explicit accepted suggestions, not from every command you execute.
+
 # Feedback Logging
 
 Record explicit user feedback for a suggestion:
@@ -151,8 +168,30 @@ python shell_next_cmd_lstm.py feedback --prompt "git " --suggestion "stat" --act
 python shell_next_cmd_lstm.py feedback --prompt "pytest " --suggestion "tests/" --action executed --exit-code 0
 ```
 
-Feedback is stored as append-only JSONL. This is data collection only; it does not update the
-model or train from rewards.
+Feedback is stored as append-only JSONL. `suggest` never auto-logs feedback. Feedback collection by
+itself does not update the model; model updates happen only through the explicit opt-in
+`online-learn` command.
+
+# Online Learning
+
+Run accepted-only online learning manually:
+
+```bash
+python shell_next_cmd_lstm.py online-learn \
+  --model ./model/checkpoint.pt \
+  --store ./feedback/events.jsonl \
+  --state ./feedback/online_state.json
+```
+
+The command prints stable JSON:
+
+```json
+{"model": "model/checkpoint.pt", "state": "feedback/online_state.json", "trained_events": 1, "updated": true}
+```
+
+Only events with `"action": "accepted"` and a non-empty string `"command"` are used. If fewer than
+`--min-events` accepted commands are available, the command returns `"updated": false` and does not
+advance the state offset. State advances only after a checkpoint update succeeds.
 
 # Model Output
 
@@ -167,7 +206,6 @@ suggestions.
 
 # Not Yet Implemented
 
-- Online learning while the terminal is being used.
 - Reinforcement learning from accepted, rejected, edited, or executed suggestions.
 - Model versioning, checkpoint metadata migration, or reproducible training seeds.
 - Packaging as an installable command-line tool.

@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import re
 import shlex
 
@@ -18,6 +19,8 @@ from LSTM.CharLSTM import CharLSTM
 
 
 DEFAULT_FEEDBACK_STORE = "./feedback/events.jsonl"
+DEFAULT_MODEL_PATH = "./model/checkpoint.pt"
+DEFAULT_ONLINE_STATE = "./feedback/online_state.json"
 FEEDBACK_REWARDS = {
     "accepted": 1.0,
     "executed": 2.0,
@@ -650,6 +653,197 @@ def feedback_cmd(args):
     print(json.dumps({"id": event["id"], "store": str(store), "reward": event["reward"]}))
 
 
+def read_online_state(state_path: Path) -> dict[str, Any]:
+    if not state_path.exists():
+        return {"offset": 0}
+
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"offset": 0}
+
+    offset = state.get("offset", 0)
+    if not isinstance(offset, int) or offset < 0:
+        offset = 0
+    return {"offset": offset}
+
+
+def write_online_state(state_path: Path, state: dict[str, Any]) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.with_name(f".{state_path.name}.{uuid4().hex}.tmp")
+    tmp_path.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp_path, state_path)
+
+
+def read_new_accepted_events(
+    store_path: Path,
+    *,
+    offset: int,
+    max_events: int,
+) -> tuple[list[dict[str, Any]], int]:
+    if not store_path.exists():
+        return [], offset
+
+    events: list[dict[str, Any]] = []
+    current_offset = offset
+
+    with store_path.open("rb") as f:
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+        if offset > file_size:
+            offset = 0
+        f.seek(offset)
+        current_offset = offset
+
+        for raw_line in f:
+            current_offset = f.tell()
+            try:
+                event = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+
+            if not isinstance(event, dict):
+                continue
+            command = event.get("command")
+            if event.get("action") == "accepted" and isinstance(command, str) and command:
+                events.append(event)
+                if len(events) >= max_events:
+                    break
+
+    return events, current_offset
+
+
+class OnlineLearnLock:
+    def __init__(self, path: Path):
+        self.path = path
+        self.fd: int | None = None
+        self.acquired = False
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        os.write(self.fd, str(os.getpid()).encode("utf-8"))
+        self.acquired = True
+        return True
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        if self.acquired:
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def online_training_text(events: list[dict[str, Any]]) -> str:
+    commands = [event["command"] for event in events if isinstance(event.get("command"), str) and event["command"]]
+    return "".join(f"{command}\n" for command in commands)
+
+
+def fine_tune_checkpoint(
+    checkpoint_path: Path,
+    events: list[dict[str, Any]],
+    *,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    grad_clip: float,
+) -> None:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model, vocab, config = load_model(checkpoint_path)
+    text = online_training_text(events)
+    encoded = vocab.encode(text)
+    saved_seq_len = int(config.get("seq_len", 128))
+    seq_len = min(saved_seq_len, max(0, len(encoded) - 1))
+    if seq_len < 1:
+        raise ValueError("not enough encoded text to train")
+
+    dataset = CharDataset(text, vocab, seq_len=seq_len)
+    if len(dataset) == 0:
+        raise ValueError("not enough online data for sequence training")
+
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    loss_fn = nn.CrossEntropyLoss()
+
+    for _ in range(epochs):
+        for x, y in dataloader:
+            x = x.to(device)
+            y = y.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            logits, _ = model(x)
+            loss = loss_fn(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+
+    checkpoint["model"] = model.cpu().state_dict()
+    tmp_path = checkpoint_path.with_name(f".{checkpoint_path.name}.{uuid4().hex}.tmp")
+    torch.save(checkpoint, tmp_path)
+    os.replace(tmp_path, checkpoint_path)
+
+
+def online_learn_result(updated: bool, trained_events: int, model: Path, state: Path) -> dict[str, Any]:
+    return {
+        "updated": updated,
+        "trained_events": trained_events,
+        "model": str(model),
+        "state": str(state),
+    }
+
+
+def online_learn_cmd(args):
+    model_path = Path(args.model)
+    store_path = Path(args.store)
+    state_path = Path(args.state)
+    lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+
+    if not model_path.exists():
+        print(json.dumps(online_learn_result(False, 0, model_path, state_path), sort_keys=True))
+        return
+
+    with OnlineLearnLock(lock_path) as acquired:
+        if not acquired:
+            print(json.dumps(online_learn_result(False, 0, model_path, state_path), sort_keys=True))
+            return
+
+        state = read_online_state(state_path)
+        events, new_offset = read_new_accepted_events(
+            store_path,
+            offset=state["offset"],
+            max_events=args.max_events,
+        )
+
+        if len(events) < args.min_events:
+            print(json.dumps(online_learn_result(False, 0, model_path, state_path), sort_keys=True))
+            return
+
+        fine_tune_checkpoint(
+            model_path,
+            events,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            grad_clip=args.grad_clip,
+        )
+        write_online_state(
+            state_path,
+            {
+                "offset": new_offset,
+                "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+        )
+        print(json.dumps(online_learn_result(True, len(events), model_path, state_path), sort_keys=True))
+
+
 
 def main():
     p = argparse.ArgumentParser(description="Train an LSTM model to predict the next shell command.")
@@ -668,7 +862,7 @@ def main():
     t.add_argument("--out-dir", type=str, default="./model")
 
     s = sub.add_parser("suggest")
-    s.add_argument("--model", type=str, default="./model/checkpoint.pt")
+    s.add_argument("--model", type=str, default=DEFAULT_MODEL_PATH)
     s.add_argument("--prompt", type=str, required=True, help="Seed text, e.g. 'git add .\\n'")
     s.add_argument("--max-new", type=int, default=120)
     s.add_argument("--temp", type=float, default=0.8)
@@ -687,6 +881,17 @@ def main():
     f.add_argument("--store", type=str, default=DEFAULT_FEEDBACK_STORE)
     f.add_argument("--context-json", type=parse_context_json, default=None)
 
+    o = sub.add_parser("online-learn")
+    o.add_argument("--model", type=str, default=DEFAULT_MODEL_PATH)
+    o.add_argument("--store", type=str, default=DEFAULT_FEEDBACK_STORE)
+    o.add_argument("--state", type=str, default=DEFAULT_ONLINE_STATE)
+    o.add_argument("--min-events", type=positive_int, default=1)
+    o.add_argument("--max-events", type=positive_int, default=8)
+    o.add_argument("--epochs", type=positive_int, default=1)
+    o.add_argument("--batch-size", type=positive_int, default=8)
+    o.add_argument("--lr", type=float, default=1e-4)
+    o.add_argument("--grad-clip", type=float, default=1.0)
+
     args = p.parse_args()
 
     if args.cmd == "train":
@@ -695,6 +900,8 @@ def main():
         suggest_cmd(args)
     elif args.cmd == "feedback":
         feedback_cmd(args)
+    elif args.cmd == "online-learn":
+        online_learn_cmd(args)
     else:
         p.print_help()
 

@@ -608,6 +608,205 @@ def test_feedback_edited_stores_provided_command():
     assert cli.build_feedback_event(args)["command"] == "git status"
 
 
+def write_jsonl(path, events):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
+
+def save_test_checkpoint(path, text="git status\npytest\n", seq_len=8):
+    vocab = CharVocab(text)
+    model = CharLSTM(vocab_size=len(vocab.itos), emb_dim=4, hidden=6, layers=1, dropout=0.0)
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "vocab": vocab.itos,
+            "config": {"emb": 4, "hidden": 6, "layers": 1, "dropout": 0.0, "seq_len": seq_len},
+        },
+        path,
+    )
+
+
+def test_read_new_accepted_events_selects_only_valid_accepted_commands(tmp_path):
+    store = tmp_path / "feedback" / "events.jsonl"
+    write_jsonl(
+        store,
+        [
+            {"action": "rejected", "command": "git log"},
+            {"action": "accepted", "command": ""},
+            {"action": "accepted", "command": "git status"},
+            {"action": "edited", "command": "git diff"},
+            {"action": "accepted", "command": "pytest"},
+        ],
+    )
+
+    events, offset = cli.read_new_accepted_events(store, offset=0, max_events=10)
+
+    assert [event["command"] for event in events] == ["git status", "pytest"]
+    assert offset == store.stat().st_size
+
+
+def test_read_new_accepted_events_ignores_malformed_jsonl(tmp_path):
+    store = tmp_path / "events.jsonl"
+    store.write_text('{"action":"accepted","command":"git status"}\nnot-json\n[]\n', encoding="utf-8")
+
+    events, offset = cli.read_new_accepted_events(store, offset=0, max_events=10)
+
+    assert [event["command"] for event in events] == ["git status"]
+    assert offset == store.stat().st_size
+
+
+def test_online_learn_does_not_advance_state_below_min_events(tmp_path, capsys):
+    model = tmp_path / "model" / "checkpoint.pt"
+    model.parent.mkdir()
+    save_test_checkpoint(model)
+    store = tmp_path / "feedback" / "events.jsonl"
+    state = tmp_path / "feedback" / "online_state.json"
+    write_jsonl(store, [{"action": "accepted", "command": "git status"}])
+
+    args = SimpleNamespace(
+        model=str(model),
+        store=str(store),
+        state=str(state),
+        min_events=2,
+        max_events=8,
+        epochs=1,
+        batch_size=8,
+        lr=1e-4,
+        grad_clip=1.0,
+    )
+
+    cli.online_learn_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["updated"] is False
+    assert payload["trained_events"] == 0
+    assert not state.exists()
+
+
+def test_online_learn_advances_state_after_successful_update(tmp_path, capsys, monkeypatch):
+    model = tmp_path / "model" / "checkpoint.pt"
+    model.parent.mkdir()
+    save_test_checkpoint(model)
+    store = tmp_path / "feedback" / "events.jsonl"
+    state = tmp_path / "feedback" / "online_state.json"
+    write_jsonl(
+        store,
+        [
+            {"action": "rejected", "command": "git log"},
+            {"action": "accepted", "command": "git status"},
+        ],
+    )
+    calls = []
+
+    def fake_fine_tune(checkpoint_path, events, **kwargs):
+        calls.append((checkpoint_path, events, kwargs))
+
+    monkeypatch.setattr(cli, "fine_tune_checkpoint", fake_fine_tune)
+
+    args = SimpleNamespace(
+        model=str(model),
+        store=str(store),
+        state=str(state),
+        min_events=1,
+        max_events=8,
+        epochs=1,
+        batch_size=8,
+        lr=1e-4,
+        grad_clip=1.0,
+    )
+
+    cli.online_learn_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    saved_state = json.loads(state.read_text(encoding="utf-8"))
+    assert payload["updated"] is True
+    assert payload["trained_events"] == 1
+    assert saved_state["offset"] == store.stat().st_size
+    assert calls[0][1][0]["command"] == "git status"
+
+
+def test_fine_tune_checkpoint_updates_model_and_preserves_config_and_vocab(tmp_path):
+    checkpoint = tmp_path / "checkpoint.pt"
+    save_test_checkpoint(checkpoint, text="git status\npytest\n", seq_len=32)
+    before = torch.load(checkpoint, map_location="cpu")
+
+    cli.fine_tune_checkpoint(
+        checkpoint,
+        [{"action": "accepted", "command": "git status"}],
+        epochs=1,
+        batch_size=8,
+        lr=1e-4,
+        grad_clip=1.0,
+    )
+
+    after = torch.load(checkpoint, map_location="cpu")
+    assert after["config"] == before["config"]
+    assert after["vocab"] == before["vocab"]
+    assert any(
+        not torch.equal(before["model"][name], after["model"][name])
+        for name in before["model"]
+    )
+
+
+def test_online_learn_cmd_updates_checkpoint_from_short_command_batch(tmp_path, capsys):
+    model = tmp_path / "model" / "checkpoint.pt"
+    model.parent.mkdir()
+    save_test_checkpoint(model, text="a\n", seq_len=128)
+    store = tmp_path / "feedback" / "events.jsonl"
+    state = tmp_path / "feedback" / "online_state.json"
+    write_jsonl(store, [{"action": "accepted", "command": "a"}])
+
+    args = SimpleNamespace(
+        model=str(model),
+        store=str(store),
+        state=str(state),
+        min_events=1,
+        max_events=8,
+        epochs=1,
+        batch_size=8,
+        lr=1e-4,
+        grad_clip=1.0,
+    )
+
+    cli.online_learn_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "model": str(model),
+        "state": str(state),
+        "trained_events": 1,
+        "updated": True,
+    }
+
+
+def test_online_learn_returns_noop_when_no_usable_training_data(tmp_path, capsys):
+    model = tmp_path / "model" / "checkpoint.pt"
+    model.parent.mkdir()
+    save_test_checkpoint(model)
+    store = tmp_path / "feedback" / "events.jsonl"
+    state = tmp_path / "feedback" / "online_state.json"
+    write_jsonl(store, [{"action": "rejected", "command": "git status"}])
+
+    args = SimpleNamespace(
+        model=str(model),
+        store=str(store),
+        state=str(state),
+        min_events=1,
+        max_events=8,
+        epochs=1,
+        batch_size=8,
+        lr=1e-4,
+        grad_clip=1.0,
+    )
+
+    cli.online_learn_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["updated"] is False
+    assert payload["trained_events"] == 0
+    assert not state.exists()
+
+
 def test_parse_context_json_accepts_objects():
     assert cli.parse_context_json('{"cwd":"/tmp","last_exit_code":0}') == {
         "cwd": "/tmp",
