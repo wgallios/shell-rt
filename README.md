@@ -80,15 +80,15 @@ suggestions.
 
 # Not Yet Implemented
 
-- Reinforcement learning from accepted, rejected, edited, or executed suggestions.
-- Online learning while the terminal is being used.
 - Terminal integration for inline suggestions or tab-completion behavior.
 - Awareness of the current directory, git status, environment variables, open files, or command
   exit codes.
 - Command safety checks before suggesting destructive commands.
 - Ranking multiple candidate commands.
-- Packaging as an installable command-line tool.
+- Online learning while the terminal is being used.
+- Reinforcement learning from accepted, rejected, edited, or executed suggestions.
 - Model versioning, checkpoint metadata migration, or reproducible training seeds.
+- Packaging as an installable command-line tool.
 
 # Testing
 
