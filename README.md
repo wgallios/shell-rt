@@ -19,6 +19,8 @@ CLI for generating suggestions.
 - Prints suggestions as JSON so shell scripts or terminal integrations can consume them.
 - Provides a zsh source script for manual inline suggestions in the command line.
 - Appends local feedback events and rewards to `./feedback/events.jsonl` by default.
+- Captures low-risk terminal context in the zsh integration, including current directory,
+  previous exit code, allowlisted environment variables, and concise git state.
 
 # Setup & Installation
 
@@ -48,6 +50,17 @@ The `suggest` command prints JSON so it can be consumed from shell scripts:
 {"prompt": "git ", "suggestion": "status"}
 ```
 
+Callers can attach structured context for logging and future ranking work:
+
+```bash
+python shell_next_cmd_lstm.py suggest \
+  --prompt "git " \
+  --context-json '{"cwd":"/tmp/project","last_exit_code":0}'
+```
+
+When provided, `suggest` echoes the context object in its JSON response. The model still generates
+from `--prompt` only; context is collected and logged but is not yet used to improve generation.
+
 # Zsh Inline Suggestions
 
 Shell RT includes a lightweight zsh integration that you can source from `.zshrc`:
@@ -60,6 +73,10 @@ This v1 integration is manual-fetch, not automatic autosuggest-on-every-keystrok
 Press `Ctrl-Space` to request a suggestion for the current command buffer. If the model returns
 a suffix, zsh displays it inline as ghost text without inserting it. Press `Ctrl-F` to accept the
 visible suffix; acceptance inserts the suffix and records an `accepted` feedback event.
+
+The zsh integration sends the same context snapshot to `suggest` and to the accepted feedback
+event. Environment capture is allowlist-only: `SHELL`, `TERM`, `VIRTUAL_ENV`, `CONDA_DEFAULT_ENV`,
+`PYENV_VERSION`, and `NODE_ENV`.
 
 The integration can be configured with zsh variables before sourcing the script:
 
@@ -79,7 +96,8 @@ Record explicit user feedback for a suggestion:
 python shell_next_cmd_lstm.py feedback \
   --prompt "git " \
   --suggestion "status" \
-  --action accepted
+  --action accepted \
+  --context-json '{"cwd":"/tmp/project","last_exit_code":0}'
 ```
 
 Rejected, edited, and executed suggestions can be logged too:
@@ -104,8 +122,8 @@ suggestions.
 
 # Not Yet Implemented
 
-- Awareness of the current directory, git status, environment variables, open files, or command
-  exit codes.
+- Using captured context for ranking or generation.
+- Open-file awareness.
 - Command safety checks before suggesting destructive commands.
 - Ranking multiple candidate commands.
 - Online learning while the terminal is being used.

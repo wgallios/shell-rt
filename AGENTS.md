@@ -23,8 +23,7 @@ future ranking or learning work.
 
 ## Current Roadmap Priority
 
-1. Awareness of the current directory, git status, environment variables, open files, and exit
-   codes.
+1. Using captured context for ranking or generation, plus open-file awareness.
 2. Command safety checks before suggesting destructive commands.
 3. Ranking multiple candidate commands.
 4. Online learning while the terminal is being used.

@@ -1,4 +1,5 @@
 import json
+import argparse
 from types import SimpleNamespace
 
 import torch
@@ -59,6 +60,38 @@ def test_suggest_cmd_prints_json_completion(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["prompt"] == "git"
     assert isinstance(payload["suggestion"], str)
+    assert "context" not in payload
+
+
+def test_suggest_cmd_includes_context_when_provided(tmp_path, capsys):
+    vocab = CharVocab("git status\n")
+    model = CharLSTM(vocab_size=len(vocab.itos), emb_dim=4, hidden=6, layers=1, dropout=0.0)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "vocab": vocab.itos,
+            "config": {"emb": 4, "hidden": 6, "layers": 1, "dropout": 0.0, "seq_len": 8},
+        },
+        checkpoint_path,
+    )
+
+    context = {"cwd": "/tmp/project", "last_exit_code": 0, "env": {"TERM": "xterm-256color"}}
+    args = SimpleNamespace(
+        model=str(checkpoint_path),
+        prompt="git",
+        max_new=2,
+        temp=1.0,
+        top_k=1,
+        context_json=context,
+    )
+
+    cli.suggest_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["prompt"] == "git"
+    assert isinstance(payload["suggestion"], str)
+    assert payload["context"] == context
 
 
 def test_feedback_cmd_records_event(tmp_path, capsys):
@@ -89,6 +122,34 @@ def test_feedback_cmd_records_event(tmp_path, capsys):
     assert event["action"] == "accepted"
     assert event["command"] == "status"
     assert event["source"] == "cli"
+    assert "context" not in event
+
+
+def test_feedback_cmd_records_context(tmp_path, capsys):
+    store = tmp_path / "feedback" / "events.jsonl"
+    context = {
+        "cwd": "/tmp/project",
+        "oldpwd": "/tmp",
+        "last_exit_code": 1,
+        "git": {"ref": "main", "dirty": True, "untracked": False},
+    }
+    args = SimpleNamespace(
+        prompt="git ",
+        suggestion="status",
+        action="accepted",
+        command=None,
+        exit_code=None,
+        reward=None,
+        store=str(store),
+        context_json=context,
+    )
+
+    cli.feedback_cmd(args)
+
+    capsys.readouterr()
+    event = json.loads(store.read_text(encoding="utf-8").splitlines()[0])
+    assert event["context"] == context
+    assert event["cwd"]
 
 
 def test_feedback_default_rewards(tmp_path):
@@ -155,3 +216,29 @@ def test_feedback_edited_stores_provided_command():
     )
 
     assert cli.build_feedback_event(args)["command"] == "git status"
+
+
+def test_parse_context_json_accepts_objects():
+    assert cli.parse_context_json('{"cwd":"/tmp","last_exit_code":0}') == {
+        "cwd": "/tmp",
+        "last_exit_code": 0,
+    }
+
+
+def test_parse_context_json_rejects_invalid_json():
+    try:
+        cli.parse_context_json("{")
+    except argparse.ArgumentTypeError as exc:
+        assert "must be valid JSON" in str(exc)
+    else:
+        raise AssertionError("expected argparse.ArgumentTypeError")
+
+
+def test_parse_context_json_rejects_non_objects():
+    for value in ["[]", '"cwd"', "1"]:
+        try:
+            cli.parse_context_json(value)
+        except argparse.ArgumentTypeError as exc:
+            assert "must decode to a JSON object" in str(exc)
+        else:
+            raise AssertionError(f"expected argparse.ArgumentTypeError for {value}")

@@ -25,6 +25,18 @@ FEEDBACK_REWARDS = {
 }
 
 
+def parse_context_json(value: str) -> dict[str, Any]:
+    try:
+        context = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"--context-json must be valid JSON: {exc.msg}") from exc
+
+    if not isinstance(context, dict):
+        raise argparse.ArgumentTypeError("--context-json must decode to a JSON object")
+
+    return context
+
+
 def read_shell_history() -> str:
     paths = [Path("~/.zsh_history").expanduser(), Path("~/.bash_history").expanduser()]
     lines: List[str] = []
@@ -197,7 +209,10 @@ def suggest_cmd(args):
         seq_len=config.get("seq_len", 128),
     )
     completion = output[len(args.prompt):].strip("\n")
-    print(json.dumps({"prompt": args.prompt, "suggestion": completion}))
+    payload: dict[str, Any] = {"prompt": args.prompt, "suggestion": completion}
+    if getattr(args, "context_json", None) is not None:
+        payload["context"] = args.context_json
+    print(json.dumps(payload))
 
 
 def build_feedback_event(args) -> dict[str, Any]:
@@ -221,6 +236,8 @@ def build_feedback_event(args) -> dict[str, Any]:
         event["command"] = command
     if args.exit_code is not None:
         event["exit_code"] = args.exit_code
+    if getattr(args, "context_json", None) is not None:
+        event["context"] = args.context_json
 
     return event
 
@@ -261,6 +278,7 @@ def main():
     s.add_argument("--max-new", type=int, default=120)
     s.add_argument("--temp", type=float, default=0.8)
     s.add_argument("--top-k", type=int, default=20)
+    s.add_argument("--context-json", type=parse_context_json, default=None)
 
     f = sub.add_parser("feedback")
     f.add_argument("--prompt", type=str, required=True, help="Original prompt text.")
@@ -270,6 +288,7 @@ def main():
     f.add_argument("--exit-code", type=int, default=None)
     f.add_argument("--reward", type=float, default=None, help="Override the default action reward.")
     f.add_argument("--store", type=str, default=DEFAULT_FEEDBACK_STORE)
+    f.add_argument("--context-json", type=parse_context_json, default=None)
 
     args = p.parse_args()
 

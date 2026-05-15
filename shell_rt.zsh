@@ -19,11 +19,77 @@ typeset -g SHELL_RT_FEEDBACK_STORE="${SHELL_RT_FEEDBACK_STORE:-$SHELL_RT_ROOT/fe
 
 typeset -g SHELL_RT_SUGGESTION=""
 typeset -g SHELL_RT_SUGGESTION_PROMPT=""
+typeset -g SHELL_RT_SUGGESTION_CONTEXT=""
+typeset -g SHELL_RT_LAST_EXIT_CODE=0
 
 function shell_rt_clear_suggestion() {
   SHELL_RT_SUGGESTION=""
   SHELL_RT_SUGGESTION_PROMPT=""
+  SHELL_RT_SUGGESTION_CONTEXT=""
   POSTDISPLAY=""
+}
+
+function shell_rt_precmd() {
+  local last_status=$?
+  emulate -L zsh
+  SHELL_RT_LAST_EXIT_CODE=$last_status
+}
+
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd shell_rt_precmd
+
+function shell_rt_context_json() {
+  emulate -L zsh
+  setopt no_aliases
+
+  local git_ref="" git_dirty="" git_untracked="" git_status="" line
+
+  if command git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git_ref="$(command git symbolic-ref --quiet --short HEAD 2>/dev/null || command git rev-parse --short HEAD 2>/dev/null)"
+    git_status="$(command git status --porcelain 2>/dev/null)"
+    for line in ${(f)git_status}; do
+      if [[ "$line" == '?? '* ]]; then
+        git_untracked="true"
+      else
+        git_dirty="true"
+      fi
+    done
+  fi
+
+  SHELL_RT_CONTEXT_CWD="$PWD" \
+  SHELL_RT_CONTEXT_OLDPWD="${OLDPWD-}" \
+  SHELL_RT_CONTEXT_LAST_EXIT_CODE="${SHELL_RT_LAST_EXIT_CODE:-0}" \
+  SHELL_RT_CONTEXT_GIT_REF="$git_ref" \
+  SHELL_RT_CONTEXT_GIT_DIRTY="$git_dirty" \
+  SHELL_RT_CONTEXT_GIT_UNTRACKED="$git_untracked" \
+  "$SHELL_RT_PYTHON" -c '
+import json
+import os
+
+context = {
+    "cwd": os.environ.get("SHELL_RT_CONTEXT_CWD", ""),
+    "last_exit_code": int(os.environ.get("SHELL_RT_CONTEXT_LAST_EXIT_CODE") or 0),
+}
+
+oldpwd = os.environ.get("SHELL_RT_CONTEXT_OLDPWD")
+if oldpwd:
+    context["oldpwd"] = oldpwd
+
+allowlist = ["SHELL", "TERM", "VIRTUAL_ENV", "CONDA_DEFAULT_ENV", "PYENV_VERSION", "NODE_ENV"]
+env = {name: os.environ[name] for name in allowlist if os.environ.get(name)}
+if env:
+    context["env"] = env
+
+git_ref = os.environ.get("SHELL_RT_CONTEXT_GIT_REF")
+if git_ref:
+    context["git"] = {
+        "ref": git_ref,
+        "dirty": os.environ.get("SHELL_RT_CONTEXT_GIT_DIRTY") == "true",
+        "untracked": os.environ.get("SHELL_RT_CONTEXT_GIT_UNTRACKED") == "true",
+    }
+
+print(json.dumps(context, sort_keys=True, separators=(",", ":")), end="")
+' 2>/dev/null
 }
 
 function shell_rt_fetch_suggestion() {
@@ -31,10 +97,11 @@ function shell_rt_fetch_suggestion() {
   setopt no_aliases
 
   local prompt="$BUFFER"
-  local output suggestion
+  local context_json output suggestion
   local -a suggest_cmd
 
   shell_rt_clear_suggestion
+  context_json="$(shell_rt_context_json)" || context_json='{}'
 
   suggest_cmd=(
     "$SHELL_RT_PYTHON"
@@ -42,6 +109,7 @@ function shell_rt_fetch_suggestion() {
     suggest
     --model "$SHELL_RT_MODEL"
     --prompt "$prompt"
+    --context-json "$context_json"
   )
 
   output="$("${suggest_cmd[@]}" 2>/dev/null)" || {
@@ -75,6 +143,7 @@ if isinstance(suggestion, str):
 
   SHELL_RT_SUGGESTION="$suggestion"
   SHELL_RT_SUGGESTION_PROMPT="$prompt"
+  SHELL_RT_SUGGESTION_CONTEXT="$context_json"
   POSTDISPLAY="$suggestion"
   zle redisplay
 }
@@ -91,10 +160,10 @@ function shell_rt_accept_suggestion() {
 
   local prompt="$SHELL_RT_SUGGESTION_PROMPT"
   local suggestion="$SHELL_RT_SUGGESTION"
+  local context_json="$SHELL_RT_SUGGESTION_CONTEXT"
 
   BUFFER+="$suggestion"
   CURSOR=${#BUFFER}
-  shell_rt_clear_suggestion
 
   local -a feedback_cmd
   feedback_cmd=(
@@ -106,9 +175,11 @@ function shell_rt_accept_suggestion() {
     --action accepted
     --command "$BUFFER"
     --store "$SHELL_RT_FEEDBACK_STORE"
+    --context-json "$context_json"
   )
   "${feedback_cmd[@]}" >/dev/null 2>&1 &!
 
+  shell_rt_clear_suggestion
   zle redisplay
 }
 
