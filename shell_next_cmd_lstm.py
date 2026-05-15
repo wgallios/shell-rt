@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import random
 import re
 import shlex
 
@@ -22,6 +23,7 @@ DEFAULT_FEEDBACK_STORE = "./feedback/events.jsonl"
 DEFAULT_MODEL_PATH = "./model/checkpoint.pt"
 DEFAULT_ONLINE_STATE = "./feedback/online_state.json"
 DEFAULT_ONLINE_RL_MODE = "reward-weighted"
+CURRENT_CHECKPOINT_VERSION = 1
 FEEDBACK_REWARDS = {
     "accepted": 1.0,
     "executed": 2.0,
@@ -53,6 +55,122 @@ SUDO_FLAGS_WITH_VALUES = {
     "--user",
 }
 ENV_FLAGS_WITH_VALUES = {"-C", "-S", "-u", "--chdir", "--split-string", "--unset"}
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def seed_rngs(seed: int | None) -> torch.Generator | None:
+    if seed is None:
+        return None
+
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
+
+
+def checkpoint_version(checkpoint: dict[str, Any]) -> int:
+    version = checkpoint.get("checkpoint_version", 0)
+    if not isinstance(version, int):
+        raise ValueError("Unsupported checkpoint version: checkpoint_version must be an integer")
+    if version > CURRENT_CHECKPOINT_VERSION:
+        raise ValueError(
+            f"Unsupported checkpoint version {version}; "
+            f"this shell-rt supports up to {CURRENT_CHECKPOINT_VERSION}"
+        )
+    if version < 0:
+        raise ValueError(f"Unsupported checkpoint version {version}")
+    return version
+
+
+def checkpoint_metadata(
+    *,
+    created_by: str,
+    updated_by: str | None = None,
+    seed: int | None = None,
+    migrated_from_version: int | None = None,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = utc_now_iso()
+    metadata = dict(existing or {})
+    metadata.setdefault("created_at", now)
+    metadata.setdefault("created_by", created_by)
+    metadata["updated_at"] = now
+    metadata["updated_by"] = updated_by or created_by
+    if seed is not None:
+        metadata["seed"] = seed
+    if migrated_from_version is not None:
+        metadata["migrated_from_version"] = migrated_from_version
+    return metadata
+
+
+def make_checkpoint(
+    *,
+    model: dict[str, torch.Tensor],
+    vocab: list[str],
+    config: dict[str, Any],
+    created_by: str,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "model": model,
+        "vocab": vocab,
+        "config": config,
+        "checkpoint_version": CURRENT_CHECKPOINT_VERSION,
+        "metadata": checkpoint_metadata(created_by=created_by, seed=seed),
+    }
+
+
+def ensure_current_checkpoint_for_write(
+    checkpoint: dict[str, Any],
+    *,
+    updated_by: str,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    version = checkpoint_version(checkpoint)
+    migrated_from_version = None if version == CURRENT_CHECKPOINT_VERSION else version
+    existing_metadata = checkpoint.get("metadata")
+    if not isinstance(existing_metadata, dict):
+        existing_metadata = None
+
+    checkpoint["checkpoint_version"] = CURRENT_CHECKPOINT_VERSION
+    checkpoint["metadata"] = checkpoint_metadata(
+        created_by=updated_by,
+        updated_by=updated_by,
+        seed=seed,
+        migrated_from_version=migrated_from_version,
+        existing=existing_metadata,
+    )
+    return checkpoint
+
+
+def atomic_save_checkpoint(checkpoint: dict[str, Any], checkpoint_path: Path) -> None:
+    tmp_path = checkpoint_path.with_name(f".{checkpoint_path.name}.{uuid4().hex}.tmp")
+    torch.save(checkpoint, tmp_path)
+    os.replace(tmp_path, checkpoint_path)
+
+
+def migrate_checkpoint_file(checkpoint_path: Path) -> dict[str, Any]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    from_version = checkpoint_version(checkpoint)
+    updated = from_version != CURRENT_CHECKPOINT_VERSION
+
+    if updated:
+        ensure_current_checkpoint_for_write(checkpoint, updated_by="migrate-checkpoint")
+        atomic_save_checkpoint(checkpoint, checkpoint_path)
+
+    return {
+        "updated": updated,
+        "from_version": from_version,
+        "to_version": CURRENT_CHECKPOINT_VERSION,
+        "model": str(checkpoint_path),
+    }
 
 
 def positive_int(value: str) -> int:
@@ -253,6 +371,8 @@ def read_shell_history() -> str:
 
 
 def train_model(args):
+    seed = getattr(args, "seed", None)
+    generator = seed_rngs(seed)
     text = read_shell_history()
     print(f"Read {len(text)} characters from shell history.")
 
@@ -262,7 +382,13 @@ def train_model(args):
 
     vocab = CharVocab(text)
     dataset = CharDataset(text, vocab, seq_len=args.seq_len)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=True,
+        generator=generator,
+    )
 
     if len(dataset) == 0 or len(dataloader) == 0:
         print("Not enough command history for the requested sequence length/batch size.")
@@ -303,17 +429,19 @@ def train_model(args):
     out_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = out_dir / "checkpoint.pt"
     torch.save(
-        {
-            "model": model.state_dict(),
-            "vocab": vocab.itos,
-            "config": {
+        make_checkpoint(
+            model=model.state_dict(),
+            vocab=vocab.itos,
+            config={
                 "emb": args.emb,
                 "hidden": args.hidden,
                 "layers": args.layers,
                 "dropout": args.dropout,
                 "seq_len": args.seq_len,
             },
-        },
+            created_by="train",
+            seed=seed,
+        ),
         checkpoint_path,
     )
     print(f"Saved model to {checkpoint_path}")
@@ -322,6 +450,7 @@ def train_model(args):
 @torch.no_grad()
 def load_model(ckpt_path: Path) -> Tuple[CharLSTM, CharVocab, dict]:
     checkpoint = torch.load(ckpt_path, map_location="cpu")
+    checkpoint_version(checkpoint)
     itos = checkpoint["vocab"]
     vocab = CharVocab("")
     vocab.itos = itos
@@ -878,8 +1007,11 @@ def fine_tune_checkpoint(
     grad_clip: float,
     min_reward: float = 0.0,
     max_reward_abs: float = 1.0,
+    seed: int | None = None,
 ) -> None:
+    generator = seed_rngs(seed)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    ensure_current_checkpoint_for_write(checkpoint, updated_by="online-learn", seed=seed)
     model, vocab, config = load_model(checkpoint_path)
     saved_seq_len = int(config.get("seq_len", 128))
     examples = online_training_examples(
@@ -909,7 +1041,13 @@ def fine_tune_checkpoint(
 
     for _ in range(epochs):
         for dataset, reward_weight, negative_reward in datasets:
-            dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+            dataloader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                drop_last=False,
+                generator=generator,
+            )
             for x, y in dataloader:
                 x = x.to(device)
                 y = y.to(device)
@@ -924,9 +1062,7 @@ def fine_tune_checkpoint(
                 optimizer.step()
 
     checkpoint["model"] = model.cpu().state_dict()
-    tmp_path = checkpoint_path.with_name(f".{checkpoint_path.name}.{uuid4().hex}.tmp")
-    torch.save(checkpoint, tmp_path)
-    os.replace(tmp_path, checkpoint_path)
+    atomic_save_checkpoint(checkpoint, checkpoint_path)
 
 
 def online_learn_result(updated: bool, trained_events: int, model: Path, state: Path) -> dict[str, Any]:
@@ -977,6 +1113,7 @@ def online_learn_cmd(args):
             grad_clip=args.grad_clip,
             min_reward=min_reward,
             max_reward_abs=max_reward_abs,
+            seed=getattr(args, "seed", None),
         )
         write_online_state(
             state_path,
@@ -986,6 +1123,11 @@ def online_learn_cmd(args):
             },
         )
         print(json.dumps(online_learn_result(True, len(events), model_path, state_path), sort_keys=True))
+
+
+def migrate_checkpoint_cmd(args):
+    result = migrate_checkpoint_file(Path(args.model))
+    print(json.dumps(result, sort_keys=True))
 
 
 
@@ -1004,6 +1146,7 @@ def main():
     t.add_argument("--lr", type=float, default=3e-3)
     t.add_argument("--grad-clip", type=float, default=1.0)
     t.add_argument("--out-dir", type=str, default="./model")
+    t.add_argument("--seed", type=int, default=None)
 
     s = sub.add_parser("suggest")
     s.add_argument("--model", type=str, default=DEFAULT_MODEL_PATH)
@@ -1038,6 +1181,10 @@ def main():
     o.add_argument("--min-reward", type=float, default=0.0)
     o.add_argument("--max-reward-abs", type=float, default=1.0)
     o.add_argument("--rl-mode", choices=[DEFAULT_ONLINE_RL_MODE], default=DEFAULT_ONLINE_RL_MODE)
+    o.add_argument("--seed", type=int, default=None)
+
+    m = sub.add_parser("migrate-checkpoint")
+    m.add_argument("--model", type=str, required=True)
 
     args = p.parse_args()
 
@@ -1049,6 +1196,8 @@ def main():
         feedback_cmd(args)
     elif args.cmd == "online-learn":
         online_learn_cmd(args)
+    elif args.cmd == "migrate-checkpoint":
+        migrate_checkpoint_cmd(args)
     else:
         p.print_help()
 

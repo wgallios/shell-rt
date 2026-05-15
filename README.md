@@ -149,6 +149,33 @@ checkpoint, and atomically replaces `SHELL_RT_MODEL`. It uses `SHELL_RT_ONLINE_S
 last processed byte offset. In v1, zsh only auto-logs accepted suggestions; rejected, edited, and
 executed events are learned from when they are recorded through the `feedback` command or API.
 
+# Checkpoints And Seeds
+
+New checkpoints include `checkpoint_version: 1` plus metadata with UTC timestamps, writer identity,
+and the optional training seed. The compatibility fields `model`, `vocab`, and `config` remain
+unchanged. Older checkpoints without `checkpoint_version` still load as legacy version `0`, and
+read-only commands such as `suggest` do not rewrite them.
+
+To explicitly upgrade an older checkpoint in place:
+
+```bash
+python shell_next_cmd_lstm.py migrate-checkpoint --model ./model/checkpoint.pt
+```
+
+The migration command prints stable JSON with `updated`, `from_version`, `to_version`, and `model`.
+Running it again on a current checkpoint is a no-op.
+
+Training commands accept an optional seed:
+
+```bash
+python shell_next_cmd_lstm.py train --seed 1234
+python shell_next_cmd_lstm.py online-learn --seed 1234
+```
+
+The seed is applied to Python and Torch RNGs, including CUDA RNGs when available, and shuffled
+training loaders use a seeded Torch generator. Strict Torch deterministic algorithms are not
+enabled, so GPU kernels may still vary across hardware, drivers, or Torch versions.
+
 # Feedback Logging
 
 Record explicit user feedback for a suggestion:
@@ -218,7 +245,6 @@ suggestions.
 
 # Not Yet Implemented
 
-- Model versioning, checkpoint metadata migration, or reproducible training seeds.
 - Packaging as an installable command-line tool.
 
 # Testing

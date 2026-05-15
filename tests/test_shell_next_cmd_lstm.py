@@ -2,6 +2,7 @@ import json
 import argparse
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import shell_next_cmd_lstm as cli
@@ -24,6 +25,7 @@ def test_train_model_saves_checkpoint(tmp_path, monkeypatch):
         lr=3e-3,
         grad_clip=1.0,
         out_dir=str(tmp_path),
+        seed=None,
     )
 
     cli.train_model(args)
@@ -32,6 +34,63 @@ def test_train_model_saves_checkpoint(tmp_path, monkeypatch):
     assert checkpoint["config"]["seq_len"] == 8
     assert checkpoint["vocab"][0] == "<pad>"
     assert "model" in checkpoint
+    assert checkpoint["checkpoint_version"] == cli.CURRENT_CHECKPOINT_VERSION
+    assert checkpoint["metadata"]["created_by"] == "train"
+    assert checkpoint["metadata"]["updated_by"] == "train"
+    assert "created_at" in checkpoint["metadata"]
+    assert "updated_at" in checkpoint["metadata"]
+
+
+def test_train_model_with_same_seed_writes_identical_weights(tmp_path, monkeypatch):
+    history = ("git status\ngit add .\npytest\n") * 12
+    monkeypatch.setattr(cli, "read_shell_history", lambda: history)
+
+    def train_to(out_dir, seed):
+        args = SimpleNamespace(
+            epochs=1,
+            batch_size=2,
+            seq_len=8,
+            emb=4,
+            hidden=6,
+            layers=1,
+            dropout=0.0,
+            lr=3e-3,
+            grad_clip=1.0,
+            out_dir=str(out_dir),
+            seed=seed,
+        )
+        cli.train_model(args)
+        return torch.load(out_dir / "checkpoint.pt", map_location="cpu")["model"]
+
+    first = train_to(tmp_path / "first", 123)
+    second = train_to(tmp_path / "second", 123)
+    different = train_to(tmp_path / "different", 456)
+
+    assert all(torch.equal(first[name], second[name]) for name in first)
+    assert any(not torch.equal(first[name], different[name]) for name in first)
+
+
+def test_load_model_accepts_legacy_checkpoint(tmp_path):
+    checkpoint = tmp_path / "checkpoint.pt"
+    save_test_checkpoint(checkpoint)
+
+    model, vocab, config = cli.load_model(checkpoint)
+
+    assert isinstance(model, CharLSTM)
+    assert vocab.itos[0] == "<pad>"
+    assert config["seq_len"] == 8
+    assert "checkpoint_version" not in torch.load(checkpoint, map_location="cpu")
+
+
+def test_load_model_rejects_future_checkpoint_version(tmp_path):
+    checkpoint = tmp_path / "checkpoint.pt"
+    save_test_checkpoint(checkpoint)
+    payload = torch.load(checkpoint, map_location="cpu")
+    payload["checkpoint_version"] = cli.CURRENT_CHECKPOINT_VERSION + 1
+    torch.save(payload, checkpoint)
+
+    with pytest.raises(ValueError, match="Unsupported checkpoint version"):
+        cli.load_model(checkpoint)
 
 
 def test_suggest_cmd_prints_json_completion(tmp_path, capsys):
@@ -626,6 +685,60 @@ def save_test_checkpoint(path, text="git status\npytest\n", seq_len=8):
     )
 
 
+def test_migrate_checkpoint_cmd_updates_legacy_checkpoint_preserving_payload(tmp_path, capsys):
+    checkpoint = tmp_path / "checkpoint.pt"
+    save_test_checkpoint(checkpoint)
+    before = torch.load(checkpoint, map_location="cpu")
+
+    cli.migrate_checkpoint_cmd(SimpleNamespace(model=str(checkpoint)))
+
+    payload = json.loads(capsys.readouterr().out)
+    after = torch.load(checkpoint, map_location="cpu")
+    assert payload == {
+        "from_version": 0,
+        "model": str(checkpoint),
+        "to_version": cli.CURRENT_CHECKPOINT_VERSION,
+        "updated": True,
+    }
+    assert after["config"] == before["config"]
+    assert after["vocab"] == before["vocab"]
+    assert all(torch.equal(before["model"][name], after["model"][name]) for name in before["model"])
+    assert after["checkpoint_version"] == cli.CURRENT_CHECKPOINT_VERSION
+    assert after["metadata"]["created_by"] == "migrate-checkpoint"
+    assert after["metadata"]["updated_by"] == "migrate-checkpoint"
+    assert after["metadata"]["migrated_from_version"] == 0
+
+
+def test_migrate_checkpoint_cmd_is_idempotent_for_current_checkpoint(tmp_path, capsys):
+    checkpoint = tmp_path / "checkpoint.pt"
+    vocab = CharVocab("git status\n")
+    model = CharLSTM(vocab_size=len(vocab.itos), emb_dim=4, hidden=6, layers=1, dropout=0.0)
+    torch.save(
+        cli.make_checkpoint(
+            model=model.state_dict(),
+            vocab=vocab.itos,
+            config={"emb": 4, "hidden": 6, "layers": 1, "dropout": 0.0, "seq_len": 8},
+            created_by="test",
+            seed=99,
+        ),
+        checkpoint,
+    )
+    before = torch.load(checkpoint, map_location="cpu")
+
+    cli.migrate_checkpoint_cmd(SimpleNamespace(model=str(checkpoint)))
+
+    payload = json.loads(capsys.readouterr().out)
+    after = torch.load(checkpoint, map_location="cpu")
+    assert payload["updated"] is False
+    assert payload["from_version"] == cli.CURRENT_CHECKPOINT_VERSION
+    assert payload["to_version"] == cli.CURRENT_CHECKPOINT_VERSION
+    assert after["config"] == before["config"]
+    assert after["vocab"] == before["vocab"]
+    assert after["checkpoint_version"] == before["checkpoint_version"]
+    assert after["metadata"] == before["metadata"]
+    assert all(torch.equal(before["model"][name], after["model"][name]) for name in before["model"])
+
+
 def test_read_new_accepted_events_selects_only_valid_accepted_commands(tmp_path):
     store = tmp_path / "feedback" / "events.jsonl"
     write_jsonl(
@@ -805,6 +918,9 @@ def test_fine_tune_checkpoint_updates_model_and_preserves_config_and_vocab(tmp_p
         not torch.equal(before["model"][name], after["model"][name])
         for name in before["model"]
     )
+    assert after["checkpoint_version"] == cli.CURRENT_CHECKPOINT_VERSION
+    assert after["metadata"]["updated_by"] == "online-learn"
+    assert after["metadata"]["migrated_from_version"] == 0
 
 
 def test_fine_tune_checkpoint_updates_from_rejected_feedback(tmp_path):
@@ -844,6 +960,39 @@ def test_fine_tune_checkpoint_handles_mixed_reward_batch(tmp_path):
         lr=1e-4,
         grad_clip=1.0,
     )
+
+
+def test_fine_tune_checkpoint_with_same_seed_writes_identical_weights(tmp_path):
+    source = tmp_path / "source.pt"
+    save_test_checkpoint(source, text="git status\npytest\n", seq_len=32)
+    payload = torch.load(source, map_location="cpu")
+    first = tmp_path / "first.pt"
+    second = tmp_path / "second.pt"
+    torch.save(payload, first)
+    torch.save(payload, second)
+    events = [
+        {"action": "accepted", "command": "git status", "reward": 1.0},
+        {"action": "edited", "command": "pytest", "reward": 0.5},
+    ]
+
+    for checkpoint in (first, second):
+        cli.fine_tune_checkpoint(
+            checkpoint,
+            events,
+            epochs=1,
+            batch_size=2,
+            lr=1e-4,
+            grad_clip=1.0,
+            seed=321,
+        )
+
+    first_payload = torch.load(first, map_location="cpu")
+    second_payload = torch.load(second, map_location="cpu")
+    assert all(
+        torch.equal(first_payload["model"][name], second_payload["model"][name])
+        for name in first_payload["model"]
+    )
+    assert first_payload["metadata"]["seed"] == 321
 
 
 def test_online_learn_cmd_updates_checkpoint_from_short_command_batch(tmp_path, capsys):
