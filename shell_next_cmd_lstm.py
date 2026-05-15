@@ -25,6 +25,13 @@ FEEDBACK_REWARDS = {
 }
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def parse_context_json(value: str) -> dict[str, Any]:
     try:
         context = json.loads(value)
@@ -192,6 +199,110 @@ def sample_next(
     return prompt + vocab.decode(generated_ids)
 
 
+def collect_candidate_completions(
+    sampler,
+    *,
+    attempts: int,
+    prompt: str,
+    max_new: int,
+    temperature: float,
+    top_k: int | None,
+    seq_len: int,
+) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for _ in range(attempts):
+        output = sampler(
+            prompt=prompt,
+            max_new=max_new,
+            temperature=temperature,
+            top_k=top_k,
+            seq_len=seq_len,
+        )
+        completion = output[len(prompt):].strip("\n")
+        if not completion or completion in seen:
+            continue
+        seen.add(completion)
+        candidates.append(completion)
+
+    return candidates
+
+
+def command_starts_with(command: str, prefixes: tuple[str, ...]) -> bool:
+    normalized = command.strip()
+    return any(normalized == prefix or normalized.startswith(f"{prefix} ") for prefix in prefixes)
+
+
+def context_score(command: str, context: dict[str, Any]) -> float:
+    score = 0.0
+    normalized = command.strip()
+    git = context.get("git")
+    env = context.get("env")
+    cwd = context.get("cwd")
+
+    if isinstance(git, dict):
+        git_ref = git.get("ref")
+        in_worktree = bool(git_ref) or any(git.get(key) is True for key in ("dirty", "untracked"))
+        if in_worktree:
+            if command_starts_with(normalized, ("git status", "git diff", "git log", "git branch", "git show")):
+                score += 2.0
+            elif command_starts_with(normalized, ("git",)):
+                score += 0.75
+
+        if git.get("dirty") is True or git.get("untracked") is True:
+            if command_starts_with(normalized, ("git status", "git diff")):
+                score += 3.0
+            if command_starts_with(normalized, ("git add", "git commit")):
+                score += 2.0
+        elif in_worktree:
+            if command_starts_with(normalized, ("git status", "git pull", "git log")):
+                score += 1.25
+            if command_starts_with(normalized, ("git add", "git commit")):
+                score -= 0.5
+
+    if isinstance(env, dict):
+        has_python_env = bool(env.get("VIRTUAL_ENV")) or bool(env.get("PYENV_VERSION"))
+        has_node_env = bool(env.get("NODE_ENV"))
+        if has_python_env and command_starts_with(
+            normalized,
+            ("python", "python3", "pytest", "pip", "pip3"),
+        ):
+            score += 1.0
+        if has_node_env and command_starts_with(normalized, ("npm", "pnpm", "yarn", "node")):
+            score += 1.0
+
+    if isinstance(cwd, str):
+        cwd_name = Path(cwd).name.lower()
+        if cwd_name in {"py", "python", "django", "flask"} and command_starts_with(
+            normalized,
+            ("python", "python3", "pytest", "pip", "pip3"),
+        ):
+            score += 0.5
+        if cwd_name in {"node", "js", "javascript", "typescript", "ts", "react"} and command_starts_with(
+            normalized,
+            ("npm", "pnpm", "yarn", "node"),
+        ):
+            score += 0.5
+
+    last_exit_code = context.get("last_exit_code")
+    if isinstance(last_exit_code, int) and last_exit_code != 0:
+        if command_starts_with(
+            normalized,
+            ("git status", "pytest", "python -m pytest", "npm test", "ls", "pwd"),
+        ):
+            score += 1.25
+
+    return score
+
+
+def choose_context_candidate(prompt: str, candidates: list[str], context: dict[str, Any]) -> str | None:
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda candidate: context_score(prompt + candidate, context))
+
+
 def suggest_cmd(args):
     checkpoint_path = Path(args.model)
     if not checkpoint_path.exists():
@@ -199,16 +310,42 @@ def suggest_cmd(args):
         return
 
     model, vocab, config = load_model(checkpoint_path)
-    output = sample_next(
-        model,
-        vocab,
-        prompt=args.prompt,
-        max_new=args.max_new,
-        temperature=args.temp,
-        top_k=args.top_k,
-        seq_len=config.get("seq_len", 128),
-    )
-    completion = output[len(args.prompt):].strip("\n")
+    seq_len = config.get("seq_len", 128)
+    if getattr(args, "context_json", None) is None:
+        output = sample_next(
+            model,
+            vocab,
+            prompt=args.prompt,
+            max_new=args.max_new,
+            temperature=args.temp,
+            top_k=args.top_k,
+            seq_len=seq_len,
+        )
+        completion = output[len(args.prompt):].strip("\n")
+    else:
+        sampler = lambda **kwargs: sample_next(model, vocab, **kwargs)
+        candidates = collect_candidate_completions(
+            sampler,
+            attempts=getattr(args, "rank_candidates", 5),
+            prompt=args.prompt,
+            max_new=args.max_new,
+            temperature=args.temp,
+            top_k=args.top_k,
+            seq_len=seq_len,
+        )
+        completion = choose_context_candidate(args.prompt, candidates, args.context_json)
+        if completion is None:
+            output = sample_next(
+                model,
+                vocab,
+                prompt=args.prompt,
+                max_new=args.max_new,
+                temperature=args.temp,
+                top_k=args.top_k,
+                seq_len=seq_len,
+            )
+            completion = output[len(args.prompt):].strip("\n")
+
     payload: dict[str, Any] = {"prompt": args.prompt, "suggestion": completion}
     if getattr(args, "context_json", None) is not None:
         payload["context"] = args.context_json
@@ -279,6 +416,7 @@ def main():
     s.add_argument("--temp", type=float, default=0.8)
     s.add_argument("--top-k", type=int, default=20)
     s.add_argument("--context-json", type=parse_context_json, default=None)
+    s.add_argument("--rank-candidates", type=positive_int, default=5)
 
     f = sub.add_parser("feedback")
     f.add_argument("--prompt", type=str, required=True, help="Original prompt text.")

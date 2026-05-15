@@ -16,6 +16,7 @@ CLI for generating suggestions.
 - Trains a small PyTorch LSTM to predict the next character in command sequences.
 - Saves model checkpoints under `./model/checkpoint.pt` by default.
 - Loads a saved checkpoint and generates command continuations.
+- Uses captured context for lightweight heuristic reranking when context is provided.
 - Prints suggestions as JSON so shell scripts or terminal integrations can consume them.
 - Provides a zsh source script for manual inline suggestions in the command line.
 - Appends local feedback events and rewards to `./feedback/events.jsonl` by default.
@@ -50,7 +51,7 @@ The `suggest` command prints JSON so it can be consumed from shell scripts:
 {"prompt": "git ", "suggestion": "status"}
 ```
 
-Callers can attach structured context for logging and future ranking work:
+Callers can attach structured context for lightweight reranking:
 
 ```bash
 python shell_next_cmd_lstm.py suggest \
@@ -58,8 +59,11 @@ python shell_next_cmd_lstm.py suggest \
   --context-json '{"cwd":"/tmp/project","last_exit_code":0}'
 ```
 
-When provided, `suggest` echoes the context object in its JSON response. The model still generates
-from `--prompt` only; context is collected and logged but is not yet used to improve generation.
+When provided, `suggest` echoes the context object in its JSON response. The LSTM still generates
+from `--prompt` only; context is not model conditioning, retraining, or feedback learning. Instead,
+`suggest` samples a small set of candidate continuations and chooses among them with deterministic
+heuristics based on captured `cwd`, `last_exit_code`, `env`, and `git` fields. Use
+`--rank-candidates` to control the candidate count, defaulting to `5`.
 
 # Zsh Inline Suggestions
 
@@ -109,7 +113,7 @@ python shell_next_cmd_lstm.py feedback --prompt "pytest " --suggestion "tests/" 
 ```
 
 Feedback is stored as append-only JSONL. This is data collection only; it does not update the
-model, train from rewards, or rank future suggestions yet.
+model or train from rewards.
 
 # Model Output
 
@@ -122,7 +126,6 @@ suggestions.
 
 # Not Yet Implemented
 
-- Using captured context for ranking or generation.
 - Open-file awareness.
 - Command safety checks before suggesting destructive commands.
 - Ranking multiple candidate commands.

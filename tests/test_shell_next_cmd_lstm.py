@@ -94,6 +94,115 @@ def test_suggest_cmd_includes_context_when_provided(tmp_path, capsys):
     assert payload["context"] == context
 
 
+def test_suggest_without_context_samples_once(tmp_path, capsys, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    calls = []
+
+    monkeypatch.setattr(cli, "load_model", lambda path: (object(), object(), {"seq_len": 8}))
+
+    def fake_sample_next(*args, **kwargs):
+        calls.append(kwargs["prompt"])
+        return kwargs["prompt"] + "status\n"
+
+    monkeypatch.setattr(cli, "sample_next", fake_sample_next)
+
+    args = SimpleNamespace(
+        model=str(checkpoint_path),
+        prompt="git ",
+        max_new=20,
+        temp=1.0,
+        top_k=5,
+    )
+
+    cli.suggest_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"prompt": "git ", "suggestion": "status"}
+    assert calls == ["git "]
+
+
+def test_suggest_with_context_reranks_sampled_candidates(tmp_path, capsys, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    outputs = iter(["log\n", "status\n", "commit -m test\n"])
+
+    monkeypatch.setattr(cli, "load_model", lambda path: (object(), object(), {"seq_len": 8}))
+
+    def fake_sample_next(*args, **kwargs):
+        return kwargs["prompt"] + next(outputs)
+
+    monkeypatch.setattr(cli, "sample_next", fake_sample_next)
+
+    context = {"git": {"ref": "main", "dirty": True, "untracked": False}}
+    args = SimpleNamespace(
+        model=str(checkpoint_path),
+        prompt="git ",
+        max_new=20,
+        temp=1.0,
+        top_k=5,
+        context_json=context,
+        rank_candidates=3,
+    )
+
+    cli.suggest_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suggestion"] == "status"
+    assert payload["context"] == context
+    assert "candidates" not in payload
+
+
+def test_collect_candidate_completions_deduplicates_first_occurrence():
+    outputs = iter(["git status\n", "git status\n", "git diff\n", "git \n"])
+
+    def sampler(**kwargs):
+        return next(outputs)
+
+    candidates = cli.collect_candidate_completions(
+        sampler,
+        attempts=4,
+        prompt="git ",
+        max_new=20,
+        temperature=1.0,
+        top_k=5,
+        seq_len=8,
+    )
+
+    assert candidates == ["status", "diff"]
+
+
+def test_context_score_boosts_dirty_git_workflow_candidates():
+    context = {"git": {"ref": "main", "dirty": True, "untracked": True}}
+
+    assert cli.context_score("git status", context) > cli.context_score("python -m pytest", context)
+    assert cli.context_score("git diff", context) > cli.context_score("git pull", context)
+
+
+def test_context_score_boosts_python_virtualenv_candidates():
+    context = {"env": {"VIRTUAL_ENV": "/tmp/.venv"}}
+
+    assert cli.context_score("python -m pytest", context) > cli.context_score("npm test", context)
+    assert cli.context_score("pytest", context) > cli.context_score("git status", context)
+
+
+def test_context_score_boosts_failed_previous_command_recovery_candidates():
+    context = {"last_exit_code": 1}
+
+    assert cli.context_score("pytest", context) > cli.context_score("git commit", context)
+    assert cli.context_score("ls", context) > cli.context_score("echo done", context)
+
+
+def test_positive_int_rejects_invalid_rank_candidates_values():
+    for value in ["0", "-1"]:
+        try:
+            cli.positive_int(value)
+        except argparse.ArgumentTypeError as exc:
+            assert "positive integer" in str(exc)
+        else:
+            raise AssertionError(f"expected argparse.ArgumentTypeError for {value}")
+
+
 def test_feedback_cmd_records_event(tmp_path, capsys):
     store = tmp_path / "feedback" / "events.jsonl"
     args = SimpleNamespace(
