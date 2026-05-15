@@ -193,6 +193,43 @@ def test_context_score_boosts_failed_previous_command_recovery_candidates():
     assert cli.context_score("ls", context) > cli.context_score("echo done", context)
 
 
+def test_context_score_boosts_commands_referencing_open_file_paths():
+    context = {"open_files": ["src/app.py"]}
+
+    assert cli.context_score("pytest src/app.py", context) > cli.context_score("pytest tests/", context)
+
+
+def test_context_score_boosts_exact_open_file_path_more_than_basename():
+    context = {"open_files": ["src/app.py"]}
+
+    assert cli.context_score("pytest src/app.py", context) > cli.context_score("pytest app.py", context)
+
+
+def test_context_score_boosts_python_open_file_test_candidates():
+    context = {"open_files": ["src/app.py"]}
+
+    assert cli.context_score("python -m pytest", context) > cli.context_score("npm test", context)
+    assert cli.context_score("pytest", context) > cli.context_score("git status", context)
+
+
+def test_context_score_boosts_js_ts_and_shell_open_file_candidates():
+    js_context = {"open_files": ["web/app.tsx"]}
+    shell_context = {"open_files": ["shell_rt.zsh"]}
+
+    assert cli.context_score("npm test", js_context) > cli.context_score("pytest", js_context)
+    assert cli.context_score("node web/app.tsx", js_context) > cli.context_score("python web/app.tsx", js_context)
+    assert cli.context_score("zsh -n shell_rt.zsh", shell_context) > cli.context_score("pytest", shell_context)
+    assert cli.context_score("shellcheck shell_rt.zsh", shell_context) > cli.context_score("npm test", shell_context)
+
+
+def test_context_score_ignores_missing_malformed_open_files():
+    baseline = cli.context_score("pytest", {})
+
+    assert cli.context_score("pytest", {"open_files": None}) == baseline
+    assert cli.context_score("pytest", {"open_files": "src/app.py"}) == baseline
+    assert cli.context_score("pytest", {"open_files": [None, 3, ""]}) == baseline
+
+
 def test_positive_int_rejects_invalid_rank_candidates_values():
     for value in ["0", "-1"]:
         try:

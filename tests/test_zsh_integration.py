@@ -11,7 +11,9 @@ def test_zsh_integration_script_defines_widgets_and_keybindings():
     assert "function shell_rt_accept_suggestion()" in script
     assert "function shell_rt_context_json()" in script
     assert "function shell_rt_precmd()" in script
+    assert "function shell_rt_preexec()" in script
     assert "add-zsh-hook precmd shell_rt_precmd" in script
+    assert "add-zsh-hook preexec shell_rt_preexec" in script
     assert "zle -N shell_rt_fetch_suggestion" in script
     assert "zle -N shell_rt_accept_suggestion" in script
     assert "bindkey '^@' shell_rt_fetch_suggestion" in script
@@ -47,6 +49,18 @@ def test_zsh_integration_collects_low_risk_context():
     assert "git rev-parse --short HEAD" in script
     assert "git status --porcelain" in script
     assert "SHELL_RT_SUGGESTION_CONTEXT" in script
+
+
+def test_zsh_integration_tracks_recent_editor_files_in_context():
+    script = (ROOT / "shell_rt.zsh").read_text(encoding="utf-8")
+
+    assert "SHELL_RT_OPEN_FILES" in script
+    for editor in ["vim", "nvim", "vi", "nano", "emacs", "hx", "code"]:
+        assert editor in script
+    assert 'context["open_files"]' in script
+    assert "open_files[:5]" in script
+    assert "${#next_files} >= 5" in script
+    assert '--context-json "$context_json"' in script
 
 
 def test_readme_documents_zsh_setup_and_keybindings():

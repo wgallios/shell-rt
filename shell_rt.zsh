@@ -21,6 +21,7 @@ typeset -g SHELL_RT_SUGGESTION=""
 typeset -g SHELL_RT_SUGGESTION_PROMPT=""
 typeset -g SHELL_RT_SUGGESTION_CONTEXT=""
 typeset -g SHELL_RT_LAST_EXIT_CODE=0
+typeset -ga SHELL_RT_OPEN_FILES
 
 function shell_rt_clear_suggestion() {
   SHELL_RT_SUGGESTION=""
@@ -35,8 +36,69 @@ function shell_rt_precmd() {
   SHELL_RT_LAST_EXIT_CODE=$last_status
 }
 
+function shell_rt_track_open_file() {
+  emulate -L zsh
+  setopt no_aliases
+
+  local path="$1"
+  local -a next_files
+  local existing
+
+  [[ -f "$path" ]] || return 0
+  path="${path:A}"
+
+  next_files=("$path")
+  for existing in "${SHELL_RT_OPEN_FILES[@]}"; do
+    [[ "$existing" == "$path" ]] && continue
+    next_files+=("$existing")
+    (( ${#next_files} >= 5 )) && break
+  done
+
+  SHELL_RT_OPEN_FILES=("${next_files[@]}")
+}
+
+function shell_rt_preexec() {
+  emulate -L zsh
+  setopt no_aliases
+
+  local command_line="$1"
+  local -a words
+  words=("${(z)command_line}")
+  (( ${#words} > 0 )) || return 0
+
+  local editor="${words[1]:t}"
+  case "$editor" in
+    vim|nvim|vi|nano|emacs|hx|code) ;;
+    *) return 0 ;;
+  esac
+
+  local word previous
+  local end_options=0
+  for word in "${words[@]:1}"; do
+    if (( ! end_options )); then
+      if [[ "$word" == "--" ]]; then
+        end_options=1
+        previous="$word"
+        continue
+      fi
+      if [[ "$word" == -* || "$word" == +* ]]; then
+        previous="$word"
+        continue
+      fi
+      if [[ "$previous" == "-c" || "$previous" == "--command" || "$previous" == "-u" ]]; then
+        previous="$word"
+        continue
+      fi
+    fi
+
+    shell_rt_track_open_file "$word"
+    previous="$word"
+  done
+}
+
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd shell_rt_precmd
+add-zsh-hook preexec shell_rt_preexec
 
 function shell_rt_context_json() {
   emulate -L zsh
@@ -62,6 +124,7 @@ function shell_rt_context_json() {
   SHELL_RT_CONTEXT_GIT_REF="$git_ref" \
   SHELL_RT_CONTEXT_GIT_DIRTY="$git_dirty" \
   SHELL_RT_CONTEXT_GIT_UNTRACKED="$git_untracked" \
+  SHELL_RT_CONTEXT_OPEN_FILES="${(pj:\n:)SHELL_RT_OPEN_FILES}" \
   "$SHELL_RT_PYTHON" -c '
 import json
 import os
@@ -79,6 +142,20 @@ allowlist = ["SHELL", "TERM", "VIRTUAL_ENV", "CONDA_DEFAULT_ENV", "PYENV_VERSION
 env = {name: os.environ[name] for name in allowlist if os.environ.get(name)}
 if env:
     context["env"] = env
+
+cwd = context["cwd"]
+open_files = []
+for path in os.environ.get("SHELL_RT_CONTEXT_OPEN_FILES", "").splitlines():
+    if not path:
+        continue
+    try:
+        if cwd and os.path.commonpath([os.path.abspath(cwd), os.path.abspath(path)]) == os.path.abspath(cwd):
+            path = os.path.relpath(path, cwd)
+    except ValueError:
+        pass
+    open_files.append(path)
+if open_files:
+    context["open_files"] = open_files[:5]
 
 git_ref = os.environ.get("SHELL_RT_CONTEXT_GIT_REF")
 if git_ref:

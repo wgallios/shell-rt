@@ -21,7 +21,8 @@ CLI for generating suggestions.
 - Provides a zsh source script for manual inline suggestions in the command line.
 - Appends local feedback events and rewards to `./feedback/events.jsonl` by default.
 - Captures low-risk terminal context in the zsh integration, including current directory,
-  previous exit code, allowlisted environment variables, and concise git state.
+  previous exit code, allowlisted environment variables, concise git state, and recently opened
+  editor files.
 
 # Setup & Installation
 
@@ -62,7 +63,7 @@ python shell_next_cmd_lstm.py suggest \
 When provided, `suggest` echoes the context object in its JSON response. The LSTM still generates
 from `--prompt` only; context is not model conditioning, retraining, or feedback learning. Instead,
 `suggest` samples a small set of candidate continuations and chooses among them with deterministic
-heuristics based on captured `cwd`, `last_exit_code`, `env`, and `git` fields. Use
+heuristics based on captured `cwd`, `last_exit_code`, `env`, `git`, and `open_files` fields. Use
 `--rank-candidates` to control the candidate count, defaulting to `5`.
 
 # Zsh Inline Suggestions
@@ -81,6 +82,13 @@ visible suffix; acceptance inserts the suffix and records an `accepted` feedback
 The zsh integration sends the same context snapshot to `suggest` and to the accepted feedback
 event. Environment capture is allowlist-only: `SHELL`, `TERM`, `VIRTUAL_ENV`, `CONDA_DEFAULT_ENV`,
 `PYENV_VERSION`, and `NODE_ENV`.
+
+It also tracks the last five regular files opened through terminal editor invocations such as
+`vim`, `nvim`, `vi`, `nano`, `emacs`, `hx`, and `code`. This is recent editor-command awareness
+only, not live editor integration. These paths are included as `open_files` in context JSON and are
+used only to rerank sampled candidates, with boosts for commands that mention the file path,
+mention the basename, or match common file-type workflows such as `pytest`, `npm test`, `node`,
+`zsh -n`, and `shellcheck`.
 
 The integration can be configured with zsh variables before sourcing the script:
 
@@ -126,7 +134,6 @@ suggestions.
 
 # Not Yet Implemented
 
-- Open-file awareness.
 - Command safety checks before suggesting destructive commands.
 - Ranking multiple candidate commands.
 - Online learning while the terminal is being used.

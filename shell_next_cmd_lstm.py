@@ -234,6 +234,50 @@ def command_starts_with(command: str, prefixes: tuple[str, ...]) -> bool:
     return any(normalized == prefix or normalized.startswith(f"{prefix} ") for prefix in prefixes)
 
 
+def open_files_from_context(context: dict[str, Any]) -> list[str]:
+    open_files = context.get("open_files")
+    if not isinstance(open_files, list):
+        return []
+
+    return [path for path in open_files if isinstance(path, str) and path]
+
+
+def context_open_file_score(command: str, open_files: list[str]) -> float:
+    if not open_files:
+        return 0.0
+
+    score = 0.0
+    normalized = command.strip()
+    lower_normalized = normalized.lower()
+    suffixes = {Path(path).suffix.lower() for path in open_files}
+
+    for path in open_files:
+        if path in normalized:
+            score += 3.0
+            continue
+
+        basename = Path(path).name
+        if basename and basename in normalized:
+            score += 1.25
+
+    if ".py" in suffixes and command_starts_with(normalized, ("pytest", "python -m pytest")):
+        score += 1.0
+
+    if suffixes.intersection({".js", ".jsx", ".ts", ".tsx"}) and command_starts_with(
+        normalized,
+        ("npm test", "npm run test", "pnpm test", "yarn test", "node"),
+    ):
+        score += 1.0
+
+    if suffixes.intersection({".sh", ".zsh", ".bash"}) and (
+        command_starts_with(normalized, ("zsh -n", "bash -n", "shellcheck"))
+        or lower_normalized.startswith("sh -n ")
+    ):
+        score += 1.0
+
+    return score
+
+
 def context_score(command: str, context: dict[str, Any]) -> float:
     score = 0.0
     normalized = command.strip()
@@ -292,6 +336,8 @@ def context_score(command: str, context: dict[str, Any]) -> float:
             ("git status", "pytest", "python -m pytest", "npm test", "ls", "pwd"),
         ):
             score += 1.25
+
+    score += context_open_file_score(normalized, open_files_from_context(context))
 
     return score
 
