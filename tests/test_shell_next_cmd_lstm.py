@@ -655,6 +655,64 @@ def test_read_new_accepted_events_ignores_malformed_jsonl(tmp_path):
     assert offset == store.stat().st_size
 
 
+def test_read_new_feedback_training_events_selects_rewarded_actions(tmp_path):
+    store = tmp_path / "feedback" / "events.jsonl"
+    write_jsonl(
+        store,
+        [
+            {"action": "accepted", "command": "git status", "reward": 1.0},
+            {"action": "executed", "suggestion": "pytest", "reward": 2.0},
+            {"action": "edited", "suggestion": "git stat", "command": "git status", "reward": 0.5},
+            {"action": "rejected", "prompt": "rm ", "suggestion": "-rf .", "reward": -1.0},
+            {"action": "edited", "suggestion": "git st", "reward": 0.5},
+            {"action": "rejected", "prompt": "git ", "reward": -1.0},
+            {"action": "accepted", "command": "ignored", "reward": 0.0},
+            {"action": "unknown", "command": "ignored", "reward": 1.0},
+            "not-an-object",
+        ],
+    )
+
+    events, offset = cli.read_new_feedback_training_events(
+        store,
+        offset=0,
+        max_events=10,
+        min_reward=0.0,
+        max_reward_abs=1.0,
+    )
+
+    assert [event["_online_target"] for event in events] == [
+        "git status",
+        "pytest",
+        "git status",
+        "rm -rf .",
+    ]
+    assert [event["_online_reward"] for event in events] == [1.0, 1.0, 0.5, -1.0]
+    assert offset == store.stat().st_size
+
+
+def test_read_new_feedback_training_events_applies_min_reward_and_clamp(tmp_path):
+    store = tmp_path / "feedback" / "events.jsonl"
+    write_jsonl(
+        store,
+        [
+            {"action": "accepted", "command": "weak", "reward": 0.1},
+            {"action": "executed", "command": "strong", "reward": 5.0},
+            {"action": "rejected", "prompt": "bad ", "suggestion": "cmd", "reward": -5.0},
+        ],
+    )
+
+    events, _ = cli.read_new_feedback_training_events(
+        store,
+        offset=0,
+        max_events=10,
+        min_reward=0.5,
+        max_reward_abs=0.75,
+    )
+
+    assert [event["_online_target"] for event in events] == ["strong", "bad cmd"]
+    assert [event["_online_reward"] for event in events] == [0.75, -0.75]
+
+
 def test_online_learn_does_not_advance_state_below_min_events(tmp_path, capsys):
     model = tmp_path / "model" / "checkpoint.pt"
     model.parent.mkdir()
@@ -723,6 +781,7 @@ def test_online_learn_advances_state_after_successful_update(tmp_path, capsys, m
     assert payload["trained_events"] == 1
     assert saved_state["offset"] == store.stat().st_size
     assert calls[0][1][0]["command"] == "git status"
+    assert calls[0][1][0]["_online_target"] == "git status"
 
 
 def test_fine_tune_checkpoint_updates_model_and_preserves_config_and_vocab(tmp_path):
@@ -745,6 +804,45 @@ def test_fine_tune_checkpoint_updates_model_and_preserves_config_and_vocab(tmp_p
     assert any(
         not torch.equal(before["model"][name], after["model"][name])
         for name in before["model"]
+    )
+
+
+def test_fine_tune_checkpoint_updates_from_rejected_feedback(tmp_path):
+    checkpoint = tmp_path / "checkpoint.pt"
+    save_test_checkpoint(checkpoint, text="git status\nrm -rf .\n", seq_len=32)
+    before = torch.load(checkpoint, map_location="cpu")
+
+    cli.fine_tune_checkpoint(
+        checkpoint,
+        [{"action": "rejected", "prompt": "rm ", "suggestion": "-rf .", "reward": -1.0}],
+        epochs=1,
+        batch_size=8,
+        lr=1e-4,
+        grad_clip=1.0,
+    )
+
+    after = torch.load(checkpoint, map_location="cpu")
+    assert any(
+        not torch.equal(before["model"][name], after["model"][name])
+        for name in before["model"]
+    )
+
+
+def test_fine_tune_checkpoint_handles_mixed_reward_batch(tmp_path):
+    checkpoint = tmp_path / "checkpoint.pt"
+    save_test_checkpoint(checkpoint, text="git status\npytest\nrm -rf .\n", seq_len=32)
+
+    cli.fine_tune_checkpoint(
+        checkpoint,
+        [
+            {"action": "accepted", "command": "git status", "reward": 1.0},
+            {"action": "edited", "command": "pytest", "reward": 0.5},
+            {"action": "rejected", "prompt": "rm ", "suggestion": "-rf .", "reward": -1.0},
+        ],
+        epochs=1,
+        batch_size=8,
+        lr=1e-4,
+        grad_clip=1.0,
     )
 
 

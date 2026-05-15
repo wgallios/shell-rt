@@ -21,6 +21,7 @@ from LSTM.CharLSTM import CharLSTM
 DEFAULT_FEEDBACK_STORE = "./feedback/events.jsonl"
 DEFAULT_MODEL_PATH = "./model/checkpoint.pt"
 DEFAULT_ONLINE_STATE = "./feedback/online_state.json"
+DEFAULT_ONLINE_RL_MODE = "reward-weighted"
 FEEDBACK_REWARDS = {
     "accepted": 1.0,
     "executed": 2.0,
@@ -675,6 +676,109 @@ def write_online_state(state_path: Path, state: dict[str, Any]) -> None:
     os.replace(tmp_path, state_path)
 
 
+def feedback_training_target(event: dict[str, Any]) -> str | None:
+    action = event.get("action")
+
+    if action in {"accepted", "executed"}:
+        command = event.get("command")
+        if isinstance(command, str) and command:
+            return command
+        suggestion = event.get("suggestion")
+        if isinstance(suggestion, str) and suggestion:
+            return suggestion
+        return None
+
+    if action == "edited":
+        command = event.get("command")
+        if isinstance(command, str) and command:
+            return command
+        return None
+
+    if action == "rejected":
+        prompt = event.get("prompt")
+        suggestion = event.get("suggestion")
+        if isinstance(prompt, str) and isinstance(suggestion, str) and suggestion:
+            return prompt + suggestion
+        return None
+
+    return None
+
+
+def feedback_training_example(
+    event: dict[str, Any],
+    *,
+    min_reward: float,
+    max_reward_abs: float,
+) -> dict[str, Any] | None:
+    reward = event.get("reward", FEEDBACK_REWARDS.get(str(event.get("action")), 0.0))
+    if not isinstance(reward, (int, float)):
+        return None
+    reward = float(reward)
+    if reward == 0.0 or abs(reward) < min_reward:
+        return None
+
+    target = feedback_training_target(event)
+    if target is None:
+        return None
+
+    clamped_reward = max(-max_reward_abs, min(max_reward_abs, reward))
+    if clamped_reward == 0.0:
+        return None
+
+    return {
+        "target": target,
+        "reward": clamped_reward,
+        "action": event.get("action"),
+    }
+
+
+def read_new_feedback_training_events(
+    store_path: Path,
+    *,
+    offset: int,
+    max_events: int,
+    min_reward: float = 0.0,
+    max_reward_abs: float = 1.0,
+) -> tuple[list[dict[str, Any]], int]:
+    if not store_path.exists():
+        return [], offset
+
+    events: list[dict[str, Any]] = []
+    current_offset = offset
+
+    with store_path.open("rb") as f:
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+        if offset > file_size:
+            offset = 0
+        f.seek(offset)
+        current_offset = offset
+
+        for raw_line in f:
+            current_offset = f.tell()
+            try:
+                event = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+
+            if not isinstance(event, dict):
+                continue
+            example = feedback_training_example(
+                event,
+                min_reward=min_reward,
+                max_reward_abs=max_reward_abs,
+            )
+            if example is not None:
+                event = dict(event)
+                event["_online_target"] = example["target"]
+                event["_online_reward"] = example["reward"]
+                events.append(event)
+                if len(events) >= max_events:
+                    break
+
+    return events, current_offset
+
+
 def read_new_accepted_events(
     store_path: Path,
     *,
@@ -740,9 +844,28 @@ class OnlineLearnLock:
                 pass
 
 
-def online_training_text(events: list[dict[str, Any]]) -> str:
-    commands = [event["command"] for event in events if isinstance(event.get("command"), str) and event["command"]]
-    return "".join(f"{command}\n" for command in commands)
+def online_training_examples(
+    events: list[dict[str, Any]],
+    *,
+    min_reward: float,
+    max_reward_abs: float,
+) -> list[dict[str, Any]]:
+    examples = []
+    for event in events:
+        target = event.get("_online_target")
+        reward = event.get("_online_reward")
+        if isinstance(target, str) and isinstance(reward, (int, float)):
+            examples.append({"target": target, "reward": float(reward)})
+            continue
+
+        example = feedback_training_example(
+            event,
+            min_reward=min_reward,
+            max_reward_abs=max_reward_abs,
+        )
+        if example is not None:
+            examples.append(example)
+    return examples
 
 
 def fine_tune_checkpoint(
@@ -753,21 +876,31 @@ def fine_tune_checkpoint(
     batch_size: int,
     lr: float,
     grad_clip: float,
+    min_reward: float = 0.0,
+    max_reward_abs: float = 1.0,
 ) -> None:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model, vocab, config = load_model(checkpoint_path)
-    text = online_training_text(events)
-    encoded = vocab.encode(text)
     saved_seq_len = int(config.get("seq_len", 128))
-    seq_len = min(saved_seq_len, max(0, len(encoded) - 1))
-    if seq_len < 1:
-        raise ValueError("not enough encoded text to train")
+    examples = online_training_examples(
+        events,
+        min_reward=min_reward,
+        max_reward_abs=max_reward_abs,
+    )
+    datasets = []
+    for example in examples:
+        text = f"{example['target']}\n"
+        encoded = vocab.encode(text)
+        seq_len = min(saved_seq_len, max(0, len(encoded) - 1))
+        if seq_len < 1:
+            continue
+        dataset = CharDataset(text, vocab, seq_len=seq_len)
+        if len(dataset) > 0:
+            datasets.append((dataset, abs(float(example["reward"])), float(example["reward"]) < 0))
 
-    dataset = CharDataset(text, vocab, seq_len=seq_len)
-    if len(dataset) == 0:
+    if not datasets:
         raise ValueError("not enough online data for sequence training")
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.train()
@@ -775,15 +908,20 @@ def fine_tune_checkpoint(
     loss_fn = nn.CrossEntropyLoss()
 
     for _ in range(epochs):
-        for x, y in dataloader:
-            x = x.to(device)
-            y = y.to(device)
-            optimizer.zero_grad(set_to_none=True)
-            logits, _ = model(x)
-            loss = loss_fn(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
+        for dataset, reward_weight, negative_reward in datasets:
+            dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+            for x, y in dataloader:
+                x = x.to(device)
+                y = y.to(device)
+                optimizer.zero_grad(set_to_none=True)
+                logits, _ = model(x)
+                loss = loss_fn(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+                if negative_reward:
+                    loss = -loss
+                loss = loss * reward_weight
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
 
     checkpoint["model"] = model.cpu().state_dict()
     tmp_path = checkpoint_path.with_name(f".{checkpoint_path.name}.{uuid4().hex}.tmp")
@@ -816,10 +954,14 @@ def online_learn_cmd(args):
             return
 
         state = read_online_state(state_path)
-        events, new_offset = read_new_accepted_events(
+        min_reward = max(0.0, float(getattr(args, "min_reward", 0.0)))
+        max_reward_abs = max(0.0, float(getattr(args, "max_reward_abs", 1.0)))
+        events, new_offset = read_new_feedback_training_events(
             store_path,
             offset=state["offset"],
             max_events=args.max_events,
+            min_reward=min_reward,
+            max_reward_abs=max_reward_abs,
         )
 
         if len(events) < args.min_events:
@@ -833,6 +975,8 @@ def online_learn_cmd(args):
             batch_size=args.batch_size,
             lr=args.lr,
             grad_clip=args.grad_clip,
+            min_reward=min_reward,
+            max_reward_abs=max_reward_abs,
         )
         write_online_state(
             state_path,
@@ -891,6 +1035,9 @@ def main():
     o.add_argument("--batch-size", type=positive_int, default=8)
     o.add_argument("--lr", type=float, default=1e-4)
     o.add_argument("--grad-clip", type=float, default=1.0)
+    o.add_argument("--min-reward", type=float, default=0.0)
+    o.add_argument("--max-reward-abs", type=float, default=1.0)
+    o.add_argument("--rl-mode", choices=[DEFAULT_ONLINE_RL_MODE], default=DEFAULT_ONLINE_RL_MODE)
 
     args = p.parse_args()
 

@@ -23,7 +23,7 @@ CLI for generating suggestions.
 - Prints suggestions as JSON so shell scripts or terminal integrations can consume them.
 - Provides a zsh source script for manual inline suggestions in the command line.
 - Appends local feedback events and rewards to `./feedback/events.jsonl` by default.
-- Can opt in to accepted-only online learning from zsh feedback events in small background batches.
+- Can opt in to reward-weighted online learning from explicit feedback events in small batches.
 - Captures low-risk terminal context in the zsh integration, including current directory,
   previous exit code, allowlisted environment variables, concise git state, and recently opened
   editor files.
@@ -133,7 +133,7 @@ source /path/to/shell-rt/shell_rt.zsh
 ```
 
 Online learning is disabled by default. To fine-tune the current checkpoint after accepted
-suggestions, opt in before sourcing:
+suggestions from zsh, opt in before sourcing:
 
 ```zsh
 SHELL_RT_ONLINE_LEARNING=1
@@ -143,10 +143,11 @@ source /path/to/shell-rt/shell_rt.zsh
 ```
 
 When enabled, accepting a suggestion still writes feedback first. After that feedback command
-succeeds, zsh starts `online-learn` in the background. The learner reads new accepted events from
-`SHELL_RT_FEEDBACK_STORE`, trains a tiny batch, writes a temporary checkpoint, and atomically
-replaces `SHELL_RT_MODEL`. It uses `SHELL_RT_ONLINE_STATE` to track the last processed byte offset.
-This v1 path learns only from explicit accepted suggestions, not from every command you execute.
+succeeds, zsh starts `online-learn` in the background. The learner reads new explicit feedback
+events from `SHELL_RT_FEEDBACK_STORE`, trains a tiny reward-weighted batch, writes a temporary
+checkpoint, and atomically replaces `SHELL_RT_MODEL`. It uses `SHELL_RT_ONLINE_STATE` to track the
+last processed byte offset. In v1, zsh only auto-logs accepted suggestions; rejected, edited, and
+executed events are learned from when they are recorded through the `feedback` command or API.
 
 # Feedback Logging
 
@@ -174,13 +175,15 @@ itself does not update the model; model updates happen only through the explicit
 
 # Online Learning
 
-Run accepted-only online learning manually:
+Run reward-weighted online learning manually:
 
 ```bash
 python shell_next_cmd_lstm.py online-learn \
   --model ./model/checkpoint.pt \
   --store ./feedback/events.jsonl \
-  --state ./feedback/online_state.json
+  --state ./feedback/online_state.json \
+  --rl-mode reward-weighted \
+  --max-reward-abs 1.0
 ```
 
 The command prints stable JSON:
@@ -189,9 +192,18 @@ The command prints stable JSON:
 {"model": "model/checkpoint.pt", "state": "feedback/online_state.json", "trained_events": 1, "updated": true}
 ```
 
-Only events with `"action": "accepted"` and a non-empty string `"command"` are used. If fewer than
-`--min-events` accepted commands are available, the command returns `"updated": false` and does not
-advance the state offset. State advances only after a checkpoint update succeeds.
+This v1 reinforcement-learning path is reward-weighted online fine-tuning, not a full
+policy-gradient RL stack. Positive rewards reinforce target commands. Negative rewards, such as a
+rejected suggestion, train against the proposed full command with a clamped negative weight.
+
+Usable events are `accepted`, `executed`, `edited`, and `rejected` with non-zero rewards and usable
+target text. `accepted` and `executed` use `command` when present and otherwise use `suggestion`;
+`edited` requires `command`; `rejected` uses `prompt + suggestion`. Malformed events, missing
+targets, unsupported actions, zero rewards, and rewards below `--min-reward` are ignored. Reward
+magnitude is capped by `--max-reward-abs`.
+
+If fewer than `--min-events` usable events are available, the command returns `"updated": false` and
+does not advance the state offset. State advances only after a checkpoint update succeeds.
 
 # Model Output
 
@@ -206,7 +218,6 @@ suggestions.
 
 # Not Yet Implemented
 
-- Reinforcement learning from accepted, rejected, edited, or executed suggestions.
 - Model versioning, checkpoint metadata migration, or reproducible training seeds.
 - Packaging as an installable command-line tool.
 
