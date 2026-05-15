@@ -2,3 +2,28 @@
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shell-rt"
+version = "0.1.0"
+description = "Local shell command prediction experiment."
+readme = "README.md"
+requires-python = ">=3.12"
+license = {file = "LICENSE"}
+dependencies = ["torch"]
+
+[project.scripts]
+shell-rt = "shell_next_cmd_lstm:main"
+
+[tool.setuptools]
+py-modules = ["shell_next_cmd_lstm"]
+
+[tool.setuptools.packages.find]
+include = ["LSTM*", "dataset*", "vocab*", "shell_rt*"]
+
+[tool.setuptools.package-data]
+shell_rt = ["integrations/*.zsh", "integrations/*.bash"]

@@ -25,6 +25,9 @@ def test_zsh_integration_script_uses_cli_contract_and_feedback_store():
 
     assert "SHELL_RT_ROOT" in script
     assert "SHELL_RT_PYTHON" in script
+    assert "SHELL_RT_COMMAND" in script
+    assert 'SHELL_RT_CLI_BASE=("shell-rt")' in script
+    assert '[[ -f "$SHELL_RT_ROOT/shell_next_cmd_lstm.py" ]]' in script
     assert "SHELL_RT_MODEL" in script
     assert 'suggest' in script
     assert '--prompt "$prompt"' in script
@@ -84,6 +87,13 @@ def test_readme_documents_zsh_setup_and_keybindings():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "source /path/to/shell-rt/shell_rt.zsh" in readme
+    assert 'source "$(shell-rt integration-path --shell zsh)"' in readme
     assert "Ctrl-Space" in readme
     assert "Ctrl-F" in readme
     assert "manual-fetch" in readme
+
+
+def test_packaged_zsh_integration_matches_top_level_script():
+    assert (ROOT / "shell_rt/integrations/shell_rt.zsh").read_text(encoding="utf-8") == (
+        ROOT / "shell_rt.zsh"
+    ).read_text(encoding="utf-8")

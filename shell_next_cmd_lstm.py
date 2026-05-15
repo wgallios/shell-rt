@@ -1,4 +1,5 @@
 import argparse
+import importlib.resources
 import json
 import os
 import random
@@ -1130,6 +1131,12 @@ def migrate_checkpoint_cmd(args):
     print(json.dumps(result, sort_keys=True))
 
 
+def integration_path_cmd(args):
+    resource = importlib.resources.files("shell_rt.integrations").joinpath(f"shell_rt.{args.shell}")
+    with importlib.resources.as_file(resource) as path:
+        print(path)
+
+
 
 def main():
     p = argparse.ArgumentParser(description="Train an LSTM model to predict the next shell command.")
@@ -1186,6 +1193,9 @@ def main():
     m = sub.add_parser("migrate-checkpoint")
     m.add_argument("--model", type=str, required=True)
 
+    i = sub.add_parser("integration-path")
+    i.add_argument("--shell", choices=["zsh", "bash"], required=True)
+
     args = p.parse_args()
 
     if args.cmd == "train":
@@ -1198,6 +1208,8 @@ def main():
         online_learn_cmd(args)
     elif args.cmd == "migrate-checkpoint":
         migrate_checkpoint_cmd(args)
+    elif args.cmd == "integration-path":
+        integration_path_cmd(args)
     else:
         p.print_help()
 

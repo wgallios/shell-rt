@@ -21,7 +21,7 @@ CLI for generating suggestions.
 - Applies deterministic safety checks that suppress clear destructive command suggestions before
   display.
 - Prints suggestions as JSON so shell scripts or terminal integrations can consume them.
-- Provides a zsh source script for manual inline suggestions in the command line.
+- Provides zsh and bash source scripts for manual inline suggestions in the command line.
 - Appends local feedback events and rewards to `./feedback/events.jsonl` by default.
 - Can opt in to reward-weighted online learning from explicit feedback events in small batches.
 - Captures low-risk terminal context in the zsh integration, including current directory,
@@ -35,6 +35,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python shell_next_cmd_lstm.py --help
 ```
+
+For local development as an installed command:
+
+```bash
+pip install -e .
+shell-rt --help
+```
+
+Both forms remain supported. The examples below use the checkout script path; after installation,
+you can replace `python shell_next_cmd_lstm.py` with `shell-rt`.
 
 # Usage
 
@@ -106,6 +116,12 @@ Shell RT includes a lightweight zsh integration that you can source from `.zshrc
 source /path/to/shell-rt/shell_rt.zsh
 ```
 
+When Shell RT is installed with `pip install -e .` or from a package, source the packaged script:
+
+```zsh
+source "$(shell-rt integration-path --shell zsh)"
+```
+
 This v1 integration is manual-fetch, not automatic autosuggest-on-every-keystroke behavior.
 Press `Ctrl-Space` to request a suggestion for the current command buffer. If the model returns
 a suffix, zsh displays it inline as ghost text without inserting it. Press `Ctrl-F` to accept the
@@ -126,7 +142,9 @@ The integration can be configured with zsh variables before sourcing the script:
 
 ```zsh
 SHELL_RT_ROOT=/path/to/shell-rt
+SHELL_RT_DATA_ROOT=/path/to/shell-rt
 SHELL_RT_PYTHON=/path/to/python
+SHELL_RT_COMMAND="shell-rt"
 SHELL_RT_MODEL=/path/to/checkpoint.pt
 SHELL_RT_FEEDBACK_STORE=/path/to/events.jsonl
 source /path/to/shell-rt/shell_rt.zsh
@@ -148,6 +166,30 @@ events from `SHELL_RT_FEEDBACK_STORE`, trains a tiny reward-weighted batch, writ
 checkpoint, and atomically replaces `SHELL_RT_MODEL`. It uses `SHELL_RT_ONLINE_STATE` to track the
 last processed byte offset. In v1, zsh only auto-logs accepted suggestions; rejected, edited, and
 executed events are learned from when they are recorded through the `feedback` command or API.
+
+# Bash Inline Suggestions
+
+Shell RT also includes a sourceable bash integration:
+
+```bash
+source /path/to/shell-rt/shell_rt.bash
+```
+
+For installed usage:
+
+```bash
+source "$(shell-rt integration-path --shell bash)"
+```
+
+Bash uses Readline's `bind -x` support. Press `Ctrl-Space` to request a suggestion for the current
+command line. Bash inserts the suggestion immediately at the cursor because Readline does not expose
+the same ghost-text display mechanism used by zsh. The bash integration does not record accepted
+feedback automatically; use the explicit `feedback` command for accepted, rejected, edited, or
+executed events.
+
+The bash integration uses the same environment variables as the zsh integration where applicable,
+including `SHELL_RT_COMMAND`, `SHELL_RT_MODEL`, `SHELL_RT_FEEDBACK_STORE`, and the online-learning
+settings reserved for parity.
 
 # Checkpoints And Seeds
 
@@ -242,10 +284,6 @@ validator.
 Because this is a character model trained only on command history, output quality depends heavily
 on the amount and consistency of available history. Small or noisy histories will produce weaker
 suggestions.
-
-# Not Yet Implemented
-
-- Packaging as an installable command-line tool.
 
 # Testing
 

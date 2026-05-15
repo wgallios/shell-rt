@@ -1,0 +1,1 @@
+"""Sourceable shell integration snippets."""
