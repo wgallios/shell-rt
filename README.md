@@ -8,7 +8,7 @@ This is currently a supervised next-character prediction model. It learns from h
 commands in `~/.zsh_history` and `~/.bash_history`, saves a local checkpoint, and exposes a small
 CLI for generating suggestions.
 
-# What Works Today
+# Features
 
 - Reads zsh and bash history files from the current user account.
 - Normalizes zsh extended history entries such as `: 1699999999:0;git status`.
