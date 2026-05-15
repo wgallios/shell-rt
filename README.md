@@ -17,6 +17,7 @@ CLI for generating suggestions.
 - Saves model checkpoints under `./model/checkpoint.pt` by default.
 - Loads a saved checkpoint and generates command continuations.
 - Prints suggestions as JSON so shell scripts or terminal integrations can consume them.
+- Provides a zsh source script for manual inline suggestions in the command line.
 - Appends local feedback events and rewards to `./feedback/events.jsonl` by default.
 
 # Setup & Installation
@@ -45,6 +46,29 @@ The `suggest` command prints JSON so it can be consumed from shell scripts:
 
 ```json
 {"prompt": "git ", "suggestion": "status"}
+```
+
+# Zsh Inline Suggestions
+
+Shell RT includes a lightweight zsh integration that you can source from `.zshrc`:
+
+```zsh
+source /path/to/shell-rt/shell_rt.zsh
+```
+
+This v1 integration is manual-fetch, not automatic autosuggest-on-every-keystroke behavior.
+Press `Ctrl-Space` to request a suggestion for the current command buffer. If the model returns
+a suffix, zsh displays it inline as ghost text without inserting it. Press `Ctrl-F` to accept the
+visible suffix; acceptance inserts the suffix and records an `accepted` feedback event.
+
+The integration can be configured with zsh variables before sourcing the script:
+
+```zsh
+SHELL_RT_ROOT=/path/to/shell-rt
+SHELL_RT_PYTHON=/path/to/python
+SHELL_RT_MODEL=/path/to/checkpoint.pt
+SHELL_RT_FEEDBACK_STORE=/path/to/events.jsonl
+source /path/to/shell-rt/shell_rt.zsh
 ```
 
 # Feedback Logging
@@ -80,7 +104,6 @@ suggestions.
 
 # Not Yet Implemented
 
-- Terminal integration for inline suggestions or tab-completion behavior.
 - Awareness of the current directory, git status, environment variables, open files, or command
   exit codes.
 - Command safety checks before suggesting destructive commands.

@@ -18,16 +18,16 @@ future ranking or learning work.
 
 - Feedback events are local user data and should stay untracked under `feedback/`.
 - `suggest` should not auto-log feedback unless explicitly requested.
+- Terminal integration is currently zsh-only and source-script based via `shell_rt.zsh`.
 - Keep changes small and aligned with the current lightweight CLI structure.
 
 ## Current Roadmap Priority
 
-1. Terminal integration for inline suggestions or tab-completion behavior.
-2. Awareness of the current directory, git status, environment variables, open files, and exit
+1. Awareness of the current directory, git status, environment variables, open files, and exit
    codes.
-3. Command safety checks before suggesting destructive commands.
-4. Ranking multiple candidate commands.
-5. Online learning while the terminal is being used.
-6. Reinforcement learning from accepted, rejected, edited, or executed suggestions.
-7. Model versioning, checkpoint metadata migration, and reproducible training seeds.
-8. Packaging as an installable command-line tool.
+2. Command safety checks before suggesting destructive commands.
+3. Ranking multiple candidate commands.
+4. Online learning while the terminal is being used.
+5. Reinforcement learning from accepted, rejected, edited, or executed suggestions.
+6. Model versioning, checkpoint metadata migration, and reproducible training seeds.
+7. Packaging as an installable command-line tool.
