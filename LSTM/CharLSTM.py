@@ -9,7 +9,7 @@ class CharLSTM(nn.Module):
         self.lstm = nn.LSTM(emb_dim, hidden, num_layers=layers, dropout=dropout, batch_first=True)
         self.head = nn.Linear(hidden, vocab_size)
 
-    def foward(self, x, h=None):
+    def forward(self, x, h=None):
         x = self.emb(x)
         out, h = self.lstm(x, h)
         logits = self.head(out)
