@@ -153,6 +153,80 @@ def test_suggest_with_context_reranks_sampled_candidates(tmp_path, capsys, monke
     assert "candidates" not in payload
 
 
+def test_suggest_without_context_suppresses_unsafe_sampled_completion(tmp_path, capsys, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+
+    monkeypatch.setattr(cli, "load_model", lambda path: (object(), object(), {"seq_len": 8}))
+    monkeypatch.setattr(cli, "sample_next", lambda *args, **kwargs: kwargs["prompt"] + "reset --hard\n")
+
+    args = SimpleNamespace(
+        model=str(checkpoint_path),
+        prompt="git ",
+        max_new=20,
+        temp=1.0,
+        top_k=5,
+    )
+
+    cli.suggest_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"prompt": "git ", "suggestion": ""}
+
+
+def test_suggest_with_context_filters_unsafe_candidates_before_reranking(tmp_path, capsys, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    outputs = iter(["reset --hard\n", "status\n", "clean -fdx\n"])
+
+    monkeypatch.setattr(cli, "load_model", lambda path: (object(), object(), {"seq_len": 8}))
+    monkeypatch.setattr(cli, "sample_next", lambda *args, **kwargs: kwargs["prompt"] + next(outputs))
+
+    context = {"git": {"ref": "main", "dirty": True, "untracked": True}}
+    args = SimpleNamespace(
+        model=str(checkpoint_path),
+        prompt="git ",
+        max_new=20,
+        temp=1.0,
+        top_k=5,
+        context_json=context,
+        rank_candidates=3,
+    )
+
+    cli.suggest_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suggestion"] == "status"
+    assert payload["context"] == context
+    assert "candidates" not in payload
+
+
+def test_suggest_with_context_returns_empty_when_all_candidates_are_unsafe(tmp_path, capsys, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    outputs = iter(["reset --hard\n", "clean -fdx\n"])
+
+    monkeypatch.setattr(cli, "load_model", lambda path: (object(), object(), {"seq_len": 8}))
+    monkeypatch.setattr(cli, "sample_next", lambda *args, **kwargs: kwargs["prompt"] + next(outputs))
+
+    context = {"git": {"ref": "main", "dirty": True, "untracked": True}}
+    args = SimpleNamespace(
+        model=str(checkpoint_path),
+        prompt="git ",
+        max_new=20,
+        temp=1.0,
+        top_k=5,
+        context_json=context,
+        rank_candidates=2,
+    )
+
+    cli.suggest_cmd(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"prompt": "git ", "suggestion": "", "context": context}
+    assert "candidates" not in payload
+
+
 def test_collect_candidate_completions_deduplicates_first_occurrence():
     outputs = iter(["git status\n", "git status\n", "git diff\n", "git \n"])
 
@@ -170,6 +244,55 @@ def test_collect_candidate_completions_deduplicates_first_occurrence():
     )
 
     assert candidates == ["status", "diff"]
+
+
+def test_is_destructive_command_detects_high_confidence_destructive_patterns():
+    destructive_commands = [
+        "rm file",
+        "rm -rf /",
+        "sudo rm -rf target",
+        "env FOO=1 rm file",
+        "command rm file",
+        "git reset --hard",
+        "git clean -fdx",
+        "mkfs.ext4 /dev/sda",
+        "dd if=/dev/zero of=/dev/sda",
+        "shutdown now",
+        "chmod -R 777 .",
+        "echo ok; rm file",
+        "builtin unlink file",
+        "FOO=1 sudo -E rm file",
+        "mv old ~/.Trash",
+    ]
+
+    for command in destructive_commands:
+        assert cli.is_destructive_command(command), command
+
+
+def test_is_destructive_command_allows_common_safe_commands():
+    safe_commands = [
+        "git status",
+        "pytest",
+        "npm test",
+        'echo "rm -rf /"',
+        "git clean -n",
+        "dd if=/dev/zero of=image.bin",
+        "chmod 644 file",
+        "kill 123",
+    ]
+
+    for command in safe_commands:
+        assert not cli.is_destructive_command(command), command
+
+
+def test_is_destructive_command_handles_malformed_shell_text_without_crashing():
+    assert cli.is_destructive_command("rm 'unterminated")
+    assert not cli.is_destructive_command("echo 'unterminated rm -rf /")
+
+
+def test_is_safe_suggestion_evaluates_prompt_plus_completion():
+    assert not cli.is_safe_suggestion("git ", "reset --hard")
+    assert cli.is_safe_suggestion("git ", "status")
 
 
 def test_context_score_boosts_dirty_git_workflow_candidates():

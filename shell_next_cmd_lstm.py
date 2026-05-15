@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import shlex
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,31 @@ FEEDBACK_REWARDS = {
     "rejected": -1.0,
 }
 
+COMMAND_SEPARATORS = {";", "&&", "||", "|"}
+DESTRUCTIVE_COMMANDS = {"rm", "unlink", "rmdir", "shred", "wipefs"}
+POWER_COMMANDS = {"shutdown", "reboot", "poweroff", "halt"}
+SUDO_FLAGS_WITH_VALUES = {
+    "-A",
+    "-a",
+    "-C",
+    "-c",
+    "-g",
+    "-h",
+    "-p",
+    "-T",
+    "-t",
+    "-U",
+    "-u",
+    "--askpass",
+    "--auth-type",
+    "--close-from",
+    "--group",
+    "--host",
+    "--prompt",
+    "--user",
+}
+ENV_FLAGS_WITH_VALUES = {"-C", "-S", "-u", "--chdir", "--split-string", "--unset"}
+
 
 def positive_int(value: str) -> int:
     parsed = int(value)
@@ -42,6 +68,158 @@ def parse_context_json(value: str) -> dict[str, Any]:
         raise argparse.ArgumentTypeError("--context-json must decode to a JSON object")
 
     return context
+
+
+def shell_tokens(command: str) -> list[str]:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        return re.findall(r"&&|\|\||[;&|]|[^\s;&|]+", command)
+
+
+def split_command_segments(command: str) -> list[list[str]]:
+    segments: list[list[str]] = []
+
+    for line in command.splitlines():
+        segment: list[str] = []
+        for token in shell_tokens(line):
+            if token in COMMAND_SEPARATORS:
+                if segment:
+                    segments.append(segment)
+                    segment = []
+                continue
+            segment.append(token)
+        if segment:
+            segments.append(segment)
+
+    return segments
+
+
+def is_assignment(token: str) -> bool:
+    return re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token) is not None
+
+
+def skip_option(tokens: list[str], index: int, flags_with_values: set[str]) -> int:
+    token = tokens[index]
+    if token == "--":
+        return index + 1
+    if token.startswith("--") and "=" in token:
+        return index + 1
+    if token in flags_with_values:
+        return min(index + 2, len(tokens))
+    return index + 1
+
+
+def normalize_command_segment(tokens: list[str]) -> list[str]:
+    normalized = list(tokens)
+
+    while normalized:
+        while normalized and is_assignment(normalized[0]):
+            normalized = normalized[1:]
+
+        if not normalized:
+            return []
+
+        command_name = Path(normalized[0]).name
+
+        if command_name in {"command", "builtin"}:
+            normalized = normalized[1:]
+            continue
+
+        if command_name == "sudo":
+            index = 1
+            while index < len(normalized) and normalized[index].startswith("-"):
+                next_index = skip_option(normalized, index, SUDO_FLAGS_WITH_VALUES)
+                if normalized[index] == "--":
+                    index = next_index
+                    break
+                index = next_index
+            normalized = normalized[index:]
+            continue
+
+        if command_name == "env":
+            index = 1
+            while index < len(normalized):
+                token = normalized[index]
+                if is_assignment(token):
+                    index += 1
+                    continue
+                if token.startswith("-"):
+                    next_index = skip_option(normalized, index, ENV_FLAGS_WITH_VALUES)
+                    if token == "--":
+                        index = next_index
+                        break
+                    index = next_index
+                    continue
+                break
+            normalized = normalized[index:]
+            continue
+
+        return normalized
+
+    return []
+
+
+def has_force_flag(args: list[str]) -> bool:
+    return any(arg == "--force" or (arg.startswith("-") and not arg.startswith("--") and "f" in arg) for arg in args)
+
+
+def has_recursive_flag(args: list[str]) -> bool:
+    return any(
+        arg == "--recursive" or (arg.startswith("-") and not arg.startswith("--") and "R" in arg)
+        for arg in args
+    )
+
+
+def is_trash_path(path: str) -> bool:
+    parts = [part.lower() for part in Path(path).parts]
+    return any(part in {".trash", "trash"} for part in parts)
+
+
+def is_destructive_segment(tokens: list[str]) -> bool:
+    normalized = normalize_command_segment(tokens)
+    if not normalized:
+        return False
+
+    command_name = Path(normalized[0]).name
+    args = normalized[1:]
+
+    if command_name in DESTRUCTIVE_COMMANDS or command_name in POWER_COMMANDS:
+        return True
+
+    if command_name == "git" and len(args) >= 2:
+        if args[0] == "reset" and "--hard" in args[1:]:
+            return True
+        if args[0] == "clean" and has_force_flag(args[1:]):
+            return True
+
+    if command_name == "mkfs" or command_name.startswith("mkfs."):
+        return True
+
+    if command_name in {"fdisk", "parted"}:
+        return True
+
+    if command_name == "dd" and any(arg.startswith("of=/dev/") for arg in args):
+        return True
+
+    if command_name in {"chmod", "chown", "chgrp"} and has_recursive_flag(args):
+        return True
+
+    if command_name == "mv" and args and is_trash_path(args[-1]):
+        return True
+
+    return False
+
+
+def is_destructive_command(command: str) -> bool:
+    return any(is_destructive_segment(segment) for segment in split_command_segments(command))
+
+
+def is_safe_suggestion(prompt: str, completion: str) -> bool:
+    return not is_destructive_command(prompt + completion)
 
 
 def read_shell_history() -> str:
@@ -368,6 +546,8 @@ def suggest_cmd(args):
             seq_len=seq_len,
         )
         completion = output[len(args.prompt):].strip("\n")
+        if not is_safe_suggestion(args.prompt, completion):
+            completion = ""
     else:
         sampler = lambda **kwargs: sample_next(model, vocab, **kwargs)
         candidates = collect_candidate_completions(
@@ -379,8 +559,11 @@ def suggest_cmd(args):
             top_k=args.top_k,
             seq_len=seq_len,
         )
-        completion = choose_context_candidate(args.prompt, candidates, args.context_json)
-        if completion is None:
+        safe_candidates = [candidate for candidate in candidates if is_safe_suggestion(args.prompt, candidate)]
+        completion = choose_context_candidate(args.prompt, safe_candidates, args.context_json)
+        if completion is None and candidates:
+            completion = ""
+        elif completion is None:
             output = sample_next(
                 model,
                 vocab,
@@ -391,6 +574,8 @@ def suggest_cmd(args):
                 seq_len=seq_len,
             )
             completion = output[len(args.prompt):].strip("\n")
+            if not is_safe_suggestion(args.prompt, completion):
+                completion = ""
 
     payload: dict[str, Any] = {"prompt": args.prompt, "suggestion": completion}
     if getattr(args, "context_json", None) is not None:

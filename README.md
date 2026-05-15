@@ -17,6 +17,8 @@ CLI for generating suggestions.
 - Saves model checkpoints under `./model/checkpoint.pt` by default.
 - Loads a saved checkpoint and generates command continuations.
 - Uses captured context for lightweight heuristic reranking when context is provided.
+- Applies deterministic safety checks that suppress clear destructive command suggestions before
+  display.
 - Prints suggestions as JSON so shell scripts or terminal integrations can consume them.
 - Provides a zsh source script for manual inline suggestions in the command line.
 - Appends local feedback events and rewards to `./feedback/events.jsonl` by default.
@@ -65,6 +67,13 @@ from `--prompt` only; context is not model conditioning, retraining, or feedback
 `suggest` samples a small set of candidate continuations and chooses among them with deterministic
 heuristics based on captured `cwd`, `last_exit_code`, `env`, `git`, and `open_files` fields. Use
 `--rank-candidates` to control the candidate count, defaulting to `5`.
+
+Before output, `suggest` applies a deterministic safety gate to the full proposed command text
+formed from `--prompt` plus the generated completion. This v1 gate is conservative and suppresses
+high-confidence destructive commands such as file deletion, forced git discard workflows, disk
+formatting or device writes, power operations, recursive permission or ownership changes, and moves
+to obvious trash paths. Suppressed suggestions keep the same JSON shape and return an empty
+`"suggestion": ""`.
 
 # Zsh Inline Suggestions
 
@@ -126,7 +135,9 @@ model or train from rewards.
 # Model Output
 
 The model generates text, not validated shell commands. Suggestions should be treated as draft
-completions that a user or shell integration reviews before execution.
+completions that a user or shell integration reviews before execution. The safety gate is a
+best-effort suppression layer for generated suggestions, not a general shell sandbox or command
+validator.
 
 Because this is a character model trained only on command history, output quality depends heavily
 on the amount and consistency of available history. Small or noisy histories will produce weaker
@@ -134,7 +145,6 @@ suggestions.
 
 # Not Yet Implemented
 
-- Command safety checks before suggesting destructive commands.
 - Ranking multiple candidate commands.
 - Online learning while the terminal is being used.
 - Reinforcement learning from accepted, rejected, edited, or executed suggestions.
